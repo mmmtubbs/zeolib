@@ -17,6 +17,8 @@ Rules of the road (see zeolib/README.md and Zeolites/CLAUDE.md):
   * New scripts import from here instead of copying helpers.
   * Anything generated for the cluster is written with fileio.write_lf (CRLF kills bash/CP2K).
   * Behaviour changes require `python zeolib/selftest.py` to pass.
+  * zeolib is a git repo (since 2026-08-25). Every package shipped to a
+    cluster stamps the commit that built it via `provenance.write_stamp`.
   * Completed tests / archives are provenance — never retrofitted to zeolib.
 
 Submodules are loaded lazily so that light modules (constants, cp2k, slurm,
@@ -26,7 +28,7 @@ fileio) work in environments without ase/spglib/scipy.
 __version__ = "0.1.0"
 
 _SUBMODULES = ("constants", "geometry", "framework", "cp2k", "slurm",
-               "fileio", "maceenv")
+               "fileio", "maceenv", "provenance")
 
 
 def __getattr__(name):

@@ -32,6 +32,13 @@ generated CP2K inputs with the staged na_placement_multicomp production inputs.*
    (2026-07-08: archived mor_core silently substituted approximate UFF params
    when its RANGE import missed — ~3e-4 kcal energy shift, caught only by the
    selftest parity pin. Frozen code keeps its fallbacks; callers must guard.)
+8. **zeolib is a git repo** (since 2026-08-25; scope = `zeolib/` only — the
+   surrounding 27 GB Zeolites tree is NOT versioned). Commit before packaging:
+   every cluster package stamps the commit that built it via
+   `provenance.write_stamp(pkg_dir)`, and `provenance.require_clean()` refuses
+   to stamp a dirty tree, because a SHA that doesn't describe the shipped code
+   is worse than no SHA. `.gitattributes` pins LF on every platform, so a
+   clone on the Windows PC cannot reintroduce the CRLF failure of rule 6.
 
 ## Import pattern
 
@@ -56,6 +63,7 @@ from zeolib import cp2k, framework, geometry, slurm, fileio, constants
 | `molecules.py` | Canonical home of the 7 guest templates (`GUESTS`, `MOL_RADIUS`, `guest_positions`/`guest_atoms`/`guest_elements`) — iodides I2/HI/CH3I + confounders H2O/Cl2/NO2/NO3, origin-centred idealized seeds; key parity with `constants.MULTIPLICITY` and composition parity with the frozen FAU BindingMolecules pinned | `MOR/oldbinding/setup_all.py` MOLECULES verbatim (Foundations 2026-07-10) |
 | `placement.py` | Hand-template guest placement: `build_void_grid` (0.5 Å fractional grid, MIC clearance), `snap_to_void` (R_PROBE 1.2), `place_guest` (≤300 random orientations vs the 1.6 Å clash floor), `random_rotation`, `min_dist_mol_fw`, `ring_normal_sites` (FAU ± ring-normal anchors, driven by `framework.t_rings` not file row order). Orthorhombic results identical to v0 (a shipped Ag_5 SITE_INFO position is reproduced in selftest); general cells via geometry dispatch | `MOR/oldbinding/setup_all.py` + `test_placement.py` (Foundations 2026-07-10) |
 | `maceenv.py` | `ensure_mace_env` (correct `~/mace_env_MOR_pipeline` path + `MACE_PYTHON` override), **model registry** `MODELS`/`resolve_model` (canonical home `Zeolites/models/`, `$ZEOLIB_MODELS_DIR` override; fine-tuned `na1500-std`/`na1500-polar` + foundations `mp0-medium`/`polar-1-m`; each entry names its cluster **`env` (GPU) and `env_cpu`** conda envs for sbatch generators), `get_calc(name)` unified factory, `prep_atoms` (polar info keys), legacy `get_mace_calc` | supersedes `MOR/mace_utils.py` + `mor_core.ensure_mace_env` (stale `../mace_env`); registry 2026-07-07 (models moved out of `tests/finetune_1500/`); `env_cpu` 2026-07-08 (Si15 CPU-route launch) |
+| `provenance.py` | `version_info`/`git_sha`/`is_dirty`/`stamp_line` (which zeolib is running), `write_stamp`/`read_stamp` (a `ZEOLIB_VERSION.json` that travels WITH a package, the only form that works cluster-side where the shipped copy has no `.git`), `require_clean` (the loud path for results of record — raises on missing repo, no HEAD, or dirty tree; untracked files count as dirty because copytree ships them). Stdlib-only, so it imports under any cluster python | new 2026-08-25, prompted by four shipped zeolib copies having silently diverged with no version record |
 | `selftest.py` | Checks against real repo data — byte-parity of generated CP2K inputs, parser pins on real 1500-Ry outputs, cation parity vs the archived v1 mor_core (it prints its own count; don't restate counts here — doc-hygiene rule) | — |
 
 ## Deliberately NOT in zeolib (yet)
@@ -68,6 +76,17 @@ from zeolib import cp2k, framework, geometry, slurm, fileio, constants
 
 ## Maintenance log
 
+- 2026-08-25 — **zeolib put under version control** (`git init` in `zeolib/`,
+  branch `main`, initial commit taken from a selftest-green working state).
+  Motivation was provenance, not backup: four shipped copies —
+  `Foundations/f0_fau_rebaseline/pkg/zeolib`, `f1_naform/pkg_FAU`,
+  `.../pkg_MOR`, `MOR/pipeline/stage1a_v2/ship_rank/zeolib` — had diverged
+  from master in 6-8 modules each, with no record of which version produced
+  which numbers. Those stay frozen (rule 4). New `provenance.py` + rule 8 make
+  every future package self-identifying; `s2_package.py` now writes
+  `ZEOLIB_VERSION.json` beside its `zeolib/` copy and records the same sha in
+  `manifest.json`. `.gitignore` (pycache/.DS_Store/Drive `(1)` conflict copies)
+  and `.gitattributes` (LF everywhere) added. Selftest +19.
 - 2026-07-03 — v0.1.0 created (survey + extraction + selftest). Consumers: none
   yet; first planned consumer = na_placement_multicomp eval fixes / the
   post-rebaseline binding re-run.

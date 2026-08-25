@@ -20,6 +20,7 @@ Checks, in order:
   8. molecules guest templates vs the frozen v0/FAU copies
   9. placement void-grid/snap reproduces a shipped v0 SITE_INFO position
  10. constants per-framework combo map (charge balance, Al counts)
+ 11. provenance version stamping (git sha, dirty detection, stamp files)
 """
 import os
 import sys
@@ -1241,6 +1242,93 @@ def test_constants_combos():
         check("non-dividing ratio raises", True)
 
 
+def test_provenance():
+    print("[11] provenance (zeolib version stamping)")
+    from zeolib import provenance as prov
+
+    info = prov.version_info()
+    keys = {"zeolib_version", "vcs", "sha", "sha_full", "branch", "describe",
+            "dirty", "source", "stamped_utc"}
+    check("version_info: stable key set (manifest schema)",
+          set(info) == keys, sorted(set(info) ^ keys))
+    check("version_info: source is THIS zeolib", info["source"] == HERE, info["source"])
+
+    in_repo = prov.is_repo()
+    if in_repo:
+        check("live checkout: vcs='git' and a 9-char sha",
+              info["vcs"] == "git" and info["sha"] and len(info["sha"]) == 9,
+              (info["vcs"], info["sha"]))
+        check("sha is a prefix of sha_full",
+              bool(info["sha_full"]) and info["sha_full"].startswith(info["sha"]),
+              (info["sha"], info["sha_full"]))
+        check("dirty is a real bool (never None) inside a repo",
+              isinstance(info["dirty"], bool), info["dirty"])
+    else:
+        # A shipped copy has no .git. That must be VISIBLE, not faked clean.
+        check("no repo: vcs='none' and sha is None",
+              info["vcs"] == "none" and info["sha"] is None, info)
+        check("no repo: dirty is None, never False ('no repo' != 'clean')",
+              info["dirty"] is None, info["dirty"])
+
+    line = prov.stamp_line(info)
+    check("stamp_line one-liner names the version",
+          line.startswith("zeolib ") and "\n" not in line, line)
+    check("stamp_line marks a non-repo unmistakably",
+          ("NO-GIT-REPO" in line) == (info["vcs"] != "git"), line)
+
+    # A synthetic dirty/no-repo info must never render as a trustworthy sha
+    faked = dict(info, vcs="none", sha=None, dirty=None)
+    check("no-repo info cannot render a plausible sha",
+          "NO-GIT-REPO" in prov.stamp_line(faked), prov.stamp_line(faked))
+    dirty = dict(info, vcs="git", sha="deadbeef1", branch="main", dirty=True)
+    check("dirty info renders DIRTY, not clean",
+          "DIRTY" in prov.stamp_line(dirty), prov.stamp_line(dirty))
+
+    # write_stamp / read_stamp round-trip, LF-clean (it travels to Linux)
+    tmp = tempfile.mkdtemp()
+    written = prov.write_stamp(tmp, extra={"package": "selftest-fixture"})
+    stamp_path = os.path.join(tmp, prov.STAMP_NAME)
+    check("write_stamp emits %s" % prov.STAMP_NAME, os.path.exists(stamp_path))
+    check("stamp file is LF-only (ships to the cluster)",
+          not fileio.has_crlf(stamp_path))
+    back = prov.read_stamp(tmp)
+    check("read_stamp round-trips write_stamp", back == written,
+          (sorted(back.items()) != sorted(written.items())))
+    check("extra context merged into the stamp",
+          back.get("package") == "selftest-fixture", back.get("package"))
+
+    # Missing stamp is FATAL, not an "unknown" dict (rule 7)
+    empty = tempfile.mkdtemp()
+    try:
+        prov.read_stamp(empty)
+        check("read_stamp on an unstamped dir raises", False, "returned instead")
+    except FileNotFoundError:
+        check("read_stamp on an unstamped dir raises", True)
+
+    # require_clean is the loud path for results of record
+    try:
+        prov.require_clean(what="a selftest fixture")
+        clean_ok = True
+        err = ""
+    except RuntimeError as exc:
+        clean_ok = False
+        err = str(exc)
+    if in_repo and info["dirty"] is False:
+        check("require_clean passes on a clean checkout", clean_ok, err)
+    else:
+        check("require_clean RAISES on a dirty tree / missing repo",
+              not clean_ok, "did not raise")
+        check("  ...and the message says what to do",
+              ("Commit" in err or "not a git checkout" in err), err[:80])
+
+    # A non-repo directory proves the no-git path even from a live checkout
+    outside = tempfile.mkdtemp()
+    check("is_repo False for a plain temp dir", not prov.is_repo(outside))
+    check("git_sha None outside a repo", prov.git_sha(outside) is None)
+    check("is_dirty None (not False) outside a repo",
+          prov.is_dirty(outside) is None, prov.is_dirty(outside))
+
+
 def main():
     print("zeolib selftest (root: %s)" % ZROOT)
     test_geometry()
@@ -1255,6 +1343,7 @@ def main():
     test_molecules()
     test_placement()
     test_constants_combos()
+    test_provenance()
     print()
     if _FAILS:
         print("FAILED: %d check(s): %s" % (len(_FAILS), "; ".join(_FAILS)))
