@@ -1,0 +1,18 @@
+# zeolib generates files that run on Linux clusters (Pronghorn, Perlmutter).
+# CRLF in a shipped .py / .inp / .sbatch breaks them. Force LF in the working
+# tree on EVERY platform, including the Windows PC -- see the project rule in
+# CLAUDE.md and zeolib.fileio.write_lf.
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.inp  text eol=lf
+*.sbatch text eol=lf
+*.json text eol=lf
+*.xyz  text eol=lf
+
+# Never let git touch these
+*.png binary
+*.pdf binary
+*.model binary
