@@ -13,32 +13,57 @@ need Marcus's GitHub account and so could not be done for him.
 - `.gitattributes` — `eol=lf` on every text type, on every platform. This is
   the rule-6 CRLF guard: a clone on the Windows PC cannot reintroduce the
   CRLF-breaks-Pronghorn failure.
-- Two commits: the selftest-green baseline, then `provenance.py`.
+- Three commits: the selftest-green baseline, `provenance.py`, and this file.
+- An SSH key for GitHub (Step 2) — the remote itself is still pending.
 
 ## Step 1 — create the empty GitHub repo (needs your account)
 
-There is no `gh` CLI on this Mac, so use the web UI:
-<https://github.com/new>
+Two ways:
 
-- Name: `zeolib`
-- **Private** (public + a Zenodo DOI is a paper-time decision, not now)
-- **Do not** add a README, .gitignore, or licence — the repo already has
-  history, and an initialising commit would force a merge on the first push.
+- **Claude on the web** is connected to GitHub and can see your repos — ask it
+  to create an empty private repo named `zeolib`. (That connection does NOT
+  reach this Mac; the push below still happens locally.)
+- Or the web UI: <https://github.com/new>
 
-## Step 2 — add the remote and push
+Either way: name `zeolib`, **Private**, and **do not** add a README,
+.gitignore, or licence — the repo already has history here, and an
+initialising commit would force a merge on the first push.
 
-There is no SSH key on either machine, so use HTTPS. GitHub will ask for a
-Personal Access Token (Settings -> Developer settings -> Tokens, `repo` scope)
-— your account password will not work.
+Public + a Zenodo DOI is a paper-time decision, not now.
+
+## Step 2 — auth this Mac by SSH (done 2026-08-25)
+
+There is no `gh` CLI on this Mac (Homebrew is older than macOS 15 and its
+directories need a `sudo chown` to repair), so the GitHub CLI route was
+skipped. SSH was chosen over an HTTPS Personal Access Token for two reasons:
+tokens expire and would need redoing, and a token has to be typed into an
+interactive `git push` prompt — which means Claude cannot run the push for
+you. With SSH, the secret never leaves this machine and the push is a normal
+command.
+
+Already done here:
+
+- `~/.ssh/id_ed25519_github` + `.pub` — an ed25519 key dedicated to GitHub,
+  passphraseless (add one later with `ssh-keygen -p -f ~/.ssh/id_ed25519_github`).
+- A `Host github.com` block appended to `~/.ssh/config` (`IdentitiesOnly yes`,
+  so it never offers this key to Pronghorn). Prior config backed up alongside.
+
+Remaining manual step: paste the **public** key into
+<https://github.com/settings/keys> ("New SSH key", any title, type
+Authentication). Public keys are safe to share; the private key stays here.
 
 ```
+cat ~/.ssh/id_ed25519_github.pub
+```
+
+Verify, then push (`ssh -T` greets you by username and exits 1 — that is success):
+
+```
+ssh -T git@github.com
 cd "$ZEOLITES/zeolib"
-git remote add origin https://github.com/<your-user>/zeolib.git
+git remote add origin git@github.com:<your-user>/zeolib.git
 git push -u origin main
 ```
-
-To avoid retyping the token: `git config --global credential.helper osxkeychain`
-(macOS) / `manager` (Windows) before pushing.
 
 ## Step 3 — the Windows PC does NOT clone
 
@@ -75,7 +100,7 @@ Because GitHub has the history, this costs nothing:
 ```
 cd "$ZEOLITES"
 mv zeolib zeolib_broken
-git clone https://github.com/<your-user>/zeolib.git zeolib
+git clone git@github.com:<your-user>/zeolib.git zeolib
 ```
 
 Then diff any uncommitted work out of `zeolib_broken/` and delete it. This is
