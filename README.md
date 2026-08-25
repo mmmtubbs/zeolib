@@ -39,6 +39,7 @@ generated CP2K inputs with the staged na_placement_multicomp production inputs.*
    to stamp a dirty tree, because a SHA that doesn't describe the shipped code
    is worse than no SHA. `.gitattributes` pins LF on every platform, so a
    clone on the Windows PC cannot reintroduce the CRLF failure of rule 6.
+   Remote setup + the two-machine (Drive-shared repo) model: `GIT_SETUP.md`.
 
 ## Import pattern
 
