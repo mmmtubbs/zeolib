@@ -1,8 +1,11 @@
 # zeolib version control — setup, and the two-machine model
 
 Created 2026-08-25 alongside `git init`. Rule + rationale live in
-**README.md rule 8**; this file is only the *how*, including the steps that
-need Marcus's GitHub account and so could not be done for him.
+**README.md rule 8**; this file is only the *how*.
+
+**Status: LIVE.** Remote is `git@github.com:mmmtubbs/zeolib.git` (private),
+pushed 2026-08-25. Steps 1-2 below are kept as the record of how it was set
+up; Step 3 is the standing two-machine rule and still applies daily.
 
 ## What is already done
 
@@ -14,7 +17,7 @@ need Marcus's GitHub account and so could not be done for him.
   the rule-6 CRLF guard: a clone on the Windows PC cannot reintroduce the
   CRLF-breaks-Pronghorn failure.
 - Three commits: the selftest-green baseline, `provenance.py`, and this file.
-- An SSH key for GitHub (Step 2) — the remote itself is still pending.
+- SSH auth to GitHub (Step 2) and the `origin` remote, pushed.
 
 ## Step 1 — create the empty GitHub repo (needs your account)
 
@@ -48,22 +51,29 @@ Already done here:
 - A `Host github.com` block appended to `~/.ssh/config` (`IdentitiesOnly yes`,
   so it never offers this key to Pronghorn). Prior config backed up alongside.
 
-Remaining manual step: paste the **public** key into
-<https://github.com/settings/keys> ("New SSH key", any title, type
-Authentication). Public keys are safe to share; the private key stays here.
+The **public** key was pasted into <https://github.com/settings/keys> ("New
+SSH key", type Authentication). Public keys are safe to share; the private key
+never leaves this Mac. To re-do this on another machine, generate a NEW key
+there rather than copying this one.
 
 ```
 cat ~/.ssh/id_ed25519_github.pub
 ```
 
-Verify, then push (`ssh -T` greets you by username and exits 1 — that is success):
+GitHub's host key was verified against its published ed25519 fingerprint
+(`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`) before being added to
+`known_hosts` — worth repeating rather than blind-accepting on any new machine.
+
+What was run (`ssh -T` greets you by username and exits 1 — that is success):
 
 ```
 ssh -T git@github.com
 cd "$ZEOLITES/zeolib"
-git remote add origin git@github.com:<your-user>/zeolib.git
+git remote add origin git@github.com:mmmtubbs/zeolib.git
 git push -u origin main
 ```
+
+Day to day from here it is just `git push` — `main` tracks `origin/main`.
 
 ## Step 3 — the Windows PC does NOT clone
 
@@ -100,7 +110,7 @@ Because GitHub has the history, this costs nothing:
 ```
 cd "$ZEOLITES"
 mv zeolib zeolib_broken
-git clone git@github.com:<your-user>/zeolib.git zeolib
+git clone git@github.com:mmmtubbs/zeolib.git zeolib
 ```
 
 Then diff any uncommitted work out of `zeolib_broken/` and delete it. This is
