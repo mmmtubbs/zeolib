@@ -34,6 +34,38 @@ GTH_POTENTIAL = {
     "Bi": "GTH-PBE-q5",
 }
 
+# Valence electrons per element, read off the GTH `-qN` suffix so the table can
+# never drift from the pseudopotentials actually used. [2026-08-26,
+# tests/rks_uks_parity]
+VALENCE_ELECTRONS = {el: int(pot.rsplit("q", 1)[1])
+                     for el, pot in GTH_POTENTIAL.items()}
+
+
+def valence_electron_count(symbols, charge=0):
+    """
+    Total valence electrons for a list of element symbols at the given CHARGE
+    (CP2K's &DFT CHARGE convention: positive removes electrons).
+
+    EXISTS FOR THE SPIN BOOKKEEPING. CP2K's `MULTIPLICITY` defaults to 0 =
+    "derive it": even electron count -> 1, odd -> 2. So `UKS` with no
+    MULTIPLICITY line is the spin-unrestricted description of the SAME
+    closed-shell state as RKS only when the count is EVEN — and RKS itself is
+    only defined for an even count. A generator that builds either one should
+    assert the parity rather than discover it in a CP2K abort.
+
+    Raises KeyError for an element missing from GTH_POTENTIAL (rule 7: never
+    guess a pseudopotential's electron count).
+    """
+    n = -int(charge)
+    for s in symbols:
+        if s not in VALENCE_ELECTRONS:
+            raise KeyError("element %r not in constants.GTH_POTENTIAL — add it "
+                           "there (with provenance) rather than assuming a "
+                           "valence electron count" % s)
+        n += VALENCE_ELECTRONS[s]
+    return n
+
+
 # ── Guest molecules and spin multiplicities ─────────────────────────────────
 MULTIPLICITY = {
     "I2": 1, "HI": 1, "H2O": 1, "CH3I": 1, "Cl2": 1, "NO2": 2, "NO3": 2,

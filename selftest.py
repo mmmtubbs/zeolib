@@ -1241,6 +1241,28 @@ def test_constants_combos():
     except ValueError:
         check("non-dividing ratio raises", True)
 
+    # valence-electron bookkeeping (2026-08-26, tests/rks_uks_parity)
+    check("VALENCE_ELECTRONS read off the GTH -qN suffixes",
+          constants.VALENCE_ELECTRONS["Si"] == 4
+          and constants.VALENCE_ELECTRONS["O"] == 6
+          and constants.VALENCE_ELECTRONS["Ag"] == 11
+          and constants.VALENCE_ELECTRONS["Bi"] == 5
+          and set(constants.VALENCE_ELECTRONS) == set(constants.GTH_POTENTIAL))
+    # A charge-balanced Si:Al=11 MOR/FAU framework with 4 Ag(I): 44 Si + 4 Al
+    # + 96 O + 4 Ag = 176+12+576+44 = 808 valence electrons, even -> RKS (and
+    # UKS with no MULTIPLICITY line) are both well posed.
+    ag11 = ["Si"] * 44 + ["Al"] * 4 + ["O"] * 96 + ["Ag"] * 4
+    check("valence_electron_count: Ag_11 framework = 808 (even)",
+          constants.valence_electron_count(ag11) == 808)
+    check("valence_electron_count: CHARGE removes electrons",
+          constants.valence_electron_count(ag11, charge=1) == 807
+          and constants.valence_electron_count(["N", "O", "O"]) == 17)
+    try:
+        constants.valence_electron_count(["Si", "Xx"])
+        check("unknown element raises (no guessed q)", False)
+    except KeyError:
+        check("unknown element raises (no guessed q)", True)
+
 
 def test_provenance():
     print("[11] provenance (zeolib version stamping)")
