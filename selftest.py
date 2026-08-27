@@ -777,8 +777,19 @@ def test_cp2k_parsing():
         check("stress: unknown unit RAISES (no silent None)", True)
 
 
+EX_HOST = "user@cluster.example.edu"          # example identities: the real
+EX_BASE = "/scratch/user/MOR"                 # ones are configured, not in git
+EX_PM_HOST = "user@perlmutter.example.gov"
+
+
 def test_slurm():
     print("[5] slurm generation")
+    # Cluster identity is configured, never hardcoded (slurm.py "Cluster
+    # identity"). Pin the generated scripts against EXAMPLE values so the
+    # byte-parity guarantee survives without the repo naming real accounts.
+    os.environ["ZEOLIB_PRONGHORN_HOST"] = EX_HOST
+    os.environ["ZEOLIB_PRONGHORN_BASE"] = EX_BASE
+    os.environ["ZEOLIB_PERLMUTTER_HOST"] = EX_PM_HOST
     sb = slurm.sbatch_text("t_x", [slurm.cp2k_run_line("cell-opt.inp"),
                                    slurm.cp2k_run_line("geo-opt.inp")])
     code_lines = [ln for ln in sb.splitlines() if not ln.lstrip().startswith("#")]
@@ -945,9 +956,8 @@ def test_slurm():
     check("copy_back.sh: host+remote vars, restart excludes, no --delete, "
           "dest=script dir",
           cb.startswith("#!/usr/bin/env bash")
-          and 'HOST="user@cluster.example.edu"' in cb
-          and ('REMOTE="/scratch/user/MOR/'
-               'tests/na_placement_multicomp"') in cb
+          and ('HOST="%s"' % EX_HOST) in cb
+          and ('REMOTE="%s/tests/na_placement_multicomp"' % EX_BASE) in cb
           and "--exclude='*.wfn'" in cb and "--exclude='*.restart'" in cb
           and "--delete" not in cb
           and 'DEST="$(cd "$(dirname "$0")"' in cb)
@@ -961,7 +971,7 @@ def test_slurm():
                                          extra_excludes=("*.cube",))
     check("copy_back.sh: absolute remote_dir + perlmutter host + extra exclude "
           "(both branches)",
-          'HOST="user@perlmutter.example.gov"' in cb_abs
+          ('HOST="%s"' % EX_PM_HOST) in cb_abs
           and 'REMOTE="/pscratch/x/pkg"' in cb_abs
           and cb_abs.count("--exclude='*.cube'") == 2)
     try:
@@ -969,6 +979,39 @@ def test_slurm():
         check("copy_back.sh: base-less profile rejects relative remote_dir", False)
     except ValueError:
         check("copy_back.sh: base-less profile rejects relative remote_dir", True)
+    # Unconfigured identity is FATAL, never a placeholder (rule 7): a silently
+    # wrong host would ship the package somewhere else entirely.
+    saved = {k: os.environ.pop(k) for k in list(os.environ)
+             if k.startswith("ZEOLIB_PRONGHORN_")}
+    slurm.PRONGHORN.host = None
+    slurm.PRONGHORN.remote_base = None
+    saved_conf = slurm._CLUSTER_CONF          # this machine HAS a real config;
+    slurm._CLUSTER_CONF = os.path.join(tempfile.mkdtemp(), "none.json")
+    try:
+        slurm.ship_script_text("MOR/x")
+        check("unconfigured cluster identity raises (never a placeholder)", False)
+    except RuntimeError as exc:
+        check("unconfigured cluster identity raises (never a placeholder)",
+              "not configured" in str(exc))
+        check("  ...and the message names the env var to set",
+              "ZEOLIB_PRONGHORN_" in str(exc), str(exc)[:60])
+    slurm._CLUSTER_CONF = saved_conf
+    os.environ.update(saved)
+    # The repo itself must never regain a hardcoded login identity. Matched by
+    # PATTERN, not by literal site strings -- a guard that spells out the very
+    # values it is protecting would republish them on every read.
+    import re as _re
+    src = open(os.path.join(HERE, "slurm.py"), encoding="utf-8").read()
+    accounts = [a for a in _re.findall(r"[\w.-]+@[\w-]+\.[\w.-]+", src)
+                if "example" not in a]
+    check("slurm.py hardcodes no login account (user@host)",
+          not accounts, accounts[:3])
+    # Site scratch roots: an absolute path in a string literal that is neither
+    # the container image path nor a /tmp-ish example.
+    site_paths = [m for m in _re.findall(r'"(/[\w./-]{8,})"', src)
+                  if not m.startswith(("/apps/", "/tmp", "/usr", "/bin"))
+                  and "/user" not in m]          # documented examples
+    check("slurm.py hardcodes no site work path", not site_paths, site_paths[:3])
     # ship pusher (feedback_windows_transfer) — the upload counterpart
     sh = slurm.ship_script_text("tests/na_placement_multicomp")
     check("ship.sh: mkdir -p remote, rsync branch + tar-over-ssh fallback, "

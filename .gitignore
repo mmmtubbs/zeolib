@@ -26,3 +26,6 @@ desktop.ini
 *.wfn
 *.restart
 *.model
+
+# machine-local cluster identity (never committed — repo is public)
+clusters.json

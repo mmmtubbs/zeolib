@@ -3,8 +3,24 @@
 Created 2026-08-25 alongside `git init`. Rule + rationale live in
 **README.md rule 8**; this file is only the *how*.
 
-**Status: LIVE.** Remote is `git@github.com:mmmtubbs/zeolib.git` (private),
-pushed 2026-08-25. Steps 1-2 below are kept as the record of how it was set
+**Status: LIVE and PUBLIC.** Remote is `git@github.com:mmmtubbs/zeolib.git`,
+pushed 2026-08-25 (`$ZEOLITES` below = wherever the Zeolites tree lives on the
+machine you are on).
+
+Because it is public, **cluster login identities are configured, never
+committed** — see "Cluster identity" in `slurm.py`. Set them per machine:
+
+```
+mkdir -p ~/.config/zeolib && cat > ~/.config/zeolib/clusters.json <<'JSON'
+{"pronghorn": {"host": "you@your.cluster.edu", "base": "/your/work/path"},
+ "perlmutter": {"host": "you@your.hpc.facility"}}
+JSON
+chmod 600 ~/.config/zeolib/clusters.json
+```
+
+This file is machine-local and outside Drive, so the Windows PC needs its own
+copy (or the `$ZEOLIB_*_HOST` / `$ZEOLIB_*_BASE` env vars). Unconfigured is
+FATAL by design — a silently wrong host would ship a package to nowhere. Steps 1-2 below are kept as the record of how it was set
 up; Step 3 is the standing two-machine rule and still applies daily.
 
 ## What is already done
