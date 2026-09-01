@@ -513,6 +513,129 @@ def sample_al_arrangements(fw, n_al, n_want, perms=None, rng=None,
     return out
 
 
+def _weighted_independence_polynomial(adj, verts, weight=None):
+    """
+    Independence polynomial of the graph (adj, verts): coefficient k = number
+    of independent vertex subsets of total WEIGHT k (weight 1 each by default).
+    Branch-and-memoize on the highest-degree remaining vertex:
+        I(G) = I(G-v) + x^w(v) * I(G - N[v]).
+    Exact integer arithmetic, no enumeration — this is what makes counting
+    feasible where enumerate_al_arrangements is not.
+    """
+    weight = weight or {}
+    memo = {}
+
+    def rec(rem):
+        if not rem:
+            return (1,)
+        got = memo.get(rem)
+        if got is not None:
+            return got
+        v = max(rem, key=lambda u: len(adj[u] & rem))
+        w = weight.get(v, 1)
+        a = rec(rem - {v})                      # v excluded
+        b = rec(rem - {v} - (adj[v] & rem))     # v included
+        res = [0] * max(len(a), len(b) + w)
+        for i, c in enumerate(a):
+            res[i] += c
+        for i, c in enumerate(b):
+            res[i + w] += c
+        res = tuple(res)
+        memo[rem] = res
+        return res
+
+    return rec(frozenset(verts))
+
+
+def count_al_arrangements(fw, perms=None, n_max=None):
+    """
+    EXACT census of the Al-placement combinatorial space, for every Al count at
+    once and WITHOUT enumerating anything. Returns a dict:
+
+      n_t          : T sites in the cell
+      n_ops        : size of the T-site symmetry group used
+      raw          : raw[n]  = C(n_t, n), the no-rule count
+      loewenstein  : loew[n] = Löwenstein-valid unordered arrangements
+                     (= independent sets of size n in the Al-O-Al graph)
+      sym_distinct : sym[n]  = symmetry-distinct classes, i.e. exactly what
+                     enumerate_al_arrangements would return the length of
+      n_al_max     : the Löwenstein independence number (largest n with
+                     loew[n] > 0) — the framework's hard Si:Al floor in this
+                     cell, ratio_min = n_t/n_al_max - 1
+
+    Lists are indexed by n and run 0..n_al_max (or n_max if smaller).
+
+    Method: loewenstein[] is the independence polynomial of fw['loew']
+    (_weighted_independence_polynomial). sym_distinct[] is Burnside's lemma
+    over the same site permutations enumerate_al_arrangements canonicalizes
+    with: a subset fixed by op p is a union of p's cycles, so per op the count
+    is an independence polynomial on the QUOTIENT graph whose vertices are the
+    internally-Löwenstein-clean cycles of p, weighted by cycle length.
+
+    Provenance: new 2026-09-01, written to put exact numbers on the Stage-1a
+    "combinatorial wall" table (MOR/STAGE1A_INVESTIGATION.md §1) where Si5 /
+    Si4.33 had only been estimated. Validated in selftest against the
+    enumerator (MOR n=3/4/6 -> 844 / 7,136 / 173,833) and against the
+    brute-force labeled count (MOR n=3 -> 13,152). Seconds for a whole MOR
+    ladder vs 45.8 s to enumerate Si7 alone.
+    """
+    from math import comb
+    if perms is None:
+        perms = site_permutations(fw)
+    si = sorted(int(i) for i in fw["si_idx"])
+    n_t = len(si)
+    loew = {a: set(int(x) for x in fw["loew"][a]) for a in si}
+
+    poly = _weighted_independence_polynomial(loew, si)
+    n_al_max = max(n for n, c in enumerate(poly) if c)
+    top = n_al_max if n_max is None else min(n_al_max, int(n_max))
+
+    orbits = [0] * (top + 1)
+    for p in perms:
+        seen, cycles = set(), []
+        for s in si:
+            if s in seen:
+                continue
+            cyc, x = [], s
+            while x not in seen:
+                seen.add(x)
+                cyc.append(x)
+                x = p[x]
+            cycles.append(cyc)
+        # a cycle can only be all-Al if it is internally Löwenstein-clean
+        usable, cyc_of = [], {}
+        for ci, cyc in enumerate(cycles):
+            cs = set(cyc)
+            if any(loew[a] & cs for a in cyc):
+                continue
+            usable.append(ci)
+            for a in cyc:
+                cyc_of[a] = ci
+        qadj = dict((ci, set()) for ci in usable)
+        for ci in usable:
+            for a in cycles[ci]:
+                for b in loew[a]:
+                    cj = cyc_of.get(b)
+                    if cj is not None and cj != ci:
+                        qadj[ci].add(cj)
+                        qadj[cj].add(ci)
+        weight = dict((ci, len(cycles[ci])) for ci in usable)
+        qpoly = _weighted_independence_polynomial(qadj, usable, weight)
+        for k in range(min(top, len(qpoly) - 1) + 1):
+            orbits[k] += qpoly[k]
+    if any(o % len(perms) for o in orbits):
+        raise ArithmeticError(
+            "Burnside sum not divisible by the group order (%d) — the site "
+            "permutations are not a group under this symprec" % len(perms))
+
+    return {"n_t": n_t,
+            "n_ops": len(perms),
+            "raw": [comb(n_t, n) for n in range(top + 1)],
+            "loewenstein": [int(c) for c in poly[:top + 1]],
+            "sym_distinct": [o // len(perms) for o in orbits],
+            "n_al_max": n_al_max}
+
+
 def arrangement_invariants(fw, sites):
     """
     Cheap symmetry-invariant descriptors of an Al arrangement — the strata for

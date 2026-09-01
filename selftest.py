@@ -257,7 +257,9 @@ def test_framework():
         ok = all(i in fau["loew"][j] for i in fau["loew"] for j in fau["loew"][i])
         check("FAU Löwenstein graph symmetric, all T 4-connected",
               ok and all(len(v) == 4 for v in fau["loew"].values()))
-        # bipartite T graph (even rings only) -> Löwenstein max 24 Al; Si:Al=2
+        # bipartite T graph (even rings only) -> Löwenstein max 24 Al of 48,
+        # i.e. Si:Al=1 is reachable in FAU (contrast MOR: 5-rings cap it at 16 Al
+        # / Si:Al=2.0 — see framework.count_al_arrangements)
         # (16 Al) is feasible — the f1 FAU-Si2 sampling assumption
         color = {}
         for s in sorted(fau["loew"]):
@@ -273,7 +275,7 @@ def test_framework():
                         stack.append(v)
         bip = all(color[u] != color[v]
                   for u in fau["loew"] for v in fau["loew"][u])
-        check("FAU T graph bipartite (Si:Al=2 Löwenstein-feasible)", bip)
+        check("FAU T graph bipartite (Si:Al=1 Löwenstein-feasible)", bip)
         r6 = fwm.t_rings(fau, 6)
         r4 = fwm.t_rings(fau, 4)
         check("t_rings(FAU): 6-rings and 4-rings found, all valid cycles "
@@ -331,6 +333,25 @@ def test_enumeration():
     inv0 = fwm.arrangement_invariants(fw, s0)
     inv1 = fwm.arrangement_invariants(fw, img)
     check("arrangement_invariants equal across a symmetry image", inv0 == inv1)
+    # counting layer: exact census must agree with the enumerator it replaces
+    cnt = fwm.count_al_arrangements(fw, perms=perms)
+    check("count_al_arrangements: MOR 48 T sites / 16 ops",
+          cnt["n_t"] == 48 and cnt["n_ops"] == 16)
+    check("count: n=3 Löwenstein-valid == brute force (%d)" % brute,
+          cnt["loewenstein"][3] == brute)
+    check("count: sym_distinct n=1/3 == enumerator (4 / %d)" % len(three),
+          cnt["sym_distinct"][1] == len(one)
+          and cnt["sym_distinct"][3] == len(three))
+    four = fwm.enumerate_al_arrangements(fw, 4, perms=perms)
+    check("count: sym_distinct n=4 == enumerator (7136)",
+          cnt["sym_distinct"][4] == len(four) == 7136)
+    check("count: MOR Si7/Si5/Si4.33 = 173,833 / 1,230,530 / 2,068,709",
+          [cnt["sym_distinct"][n] for n in (6, 8, 9)]
+          == [173833, 1230530, 2068709])
+    # MOR is a 5-ring framework -> odd cycles -> Löwenstein floor Si:Al = 2.0
+    check("count: MOR independence number 16 (Si:Al floor 2.0)",
+          cnt["n_al_max"] == 16 and cnt["loewenstein"][16] == 28652)
+
     # sampling: canonical dedupe + exclusion honored
     excl = {three[0][0]}
     samp = fwm.sample_al_arrangements(fw, 3, 25, perms=perms,
