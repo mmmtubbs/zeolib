@@ -972,6 +972,18 @@ def test_slurm():
             check(label, False)
         except ValueError:
             check(label, True)
+    # --exclude in the SBATCH HEADER, not on the submit line: a Pronghorn job
+    # reaches the queue via psub, a plain resubmit, or by hand, and only the
+    # header survives all three. Off by default so the wsp fixtures stay
+    # byte-identical (2026-09-02, after the cpu-15 black-hole node).
+    _plain = slurm.sbatch_text("j", ["echo hi"])
+    _excl = slurm.sbatch_text("j", ["echo hi"], exclude_nodes="cpu-15")
+    check("sbatch_text: exclude_nodes emits --exclude, absent by default, "
+          "byte-parity otherwise",
+          "--exclude" not in _plain
+          and "#SBATCH --exclude=cpu-15\n" in _excl
+          and _excl.replace("#SBATCH --exclude=cpu-15\n", "") == _plain)
+
     # copy-back puller (feedback_ship_copyback_script) — ships in every package
     cb = slurm.copy_back_script_text("tests/na_placement_multicomp")
     check("copy_back.sh: host+remote vars, restart excludes, no --delete, "
@@ -982,6 +994,17 @@ def test_slurm():
           and "--exclude='*.wfn'" in cb and "--exclude='*.restart'" in cb
           and "--delete" not in cb
           and 'DEST="$(cd "$(dirname "$0")"' in cb)
+    # Hessians are regenerable optimizer state and are BARRED from Drive
+    # (2026-07-01 cleanup); they were half the payload of the Foundations pull
+    # that timed out on 2026-09-02, and merge_results.py discards them anyway.
+    # The rsync branch must also survive a dropped link without restarting the
+    # file it was mid-way through.
+    check("copy_back.sh: excludes Hessians (both branches) and resumes a "
+          "dropped rsync",
+          cb.count("--exclude='*.Hessian'") == 2
+          and cb.count("--exclude='*-BFGS.Hessian'") == 2
+          and "--partial" in cb and "--timeout=300" in cb
+          and "ServerAliveInterval=30" in cb)
     check("copy_back.sh: environment-adaptive (rsync branch + tar-over-ssh "
           "fallback, both excluding)",
           "command -v rsync" in cb and "rsync -avz" in cb

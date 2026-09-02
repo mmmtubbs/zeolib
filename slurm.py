@@ -181,7 +181,7 @@ def cp2k_run_line(inp, out=None, profile=PRONGHORN, ntasks=None,
 def sbatch_text(job_name, run_lines, profile=PRONGHORN, walltime=None,
                 ntasks=None, output="cp2k_%j.out",
                 qos="regular", partition=S2_PARTITION, account=S2_ACCOUNT,
-                image=None):
+                image=None, exclude_nodes=None):
     """
     A CP2K sbatch script for the given profile. run_lines: shell lines (use
     cp2k_run_line with the SAME profile; $SIF is defined on Pronghorn).
@@ -197,6 +197,16 @@ def sbatch_text(job_name, run_lines, profile=PRONGHORN, walltime=None,
     default is that every NERSC job is traceable to one image. Added 2026-08-19
     for tests/cp2k_image_parity, which runs the same inputs under 2022.1 and a
     2026-matching tag to measure the cross-image difference directly.
+    exclude_nodes: comma-separated node list for `#SBATCH --exclude=` (e.g.
+    "cpu-15"). Emitted ONLY when set, so every existing caller keeps byte
+    parity with the shipped wsp fixtures. Put the exclusion in the SBATCH
+    header rather than on the submit command line: Pronghorn jobs reach the
+    queue through psub, a plain resubmit, or Marcus's hand, and a header
+    directive survives all three. Added 2026-09-02 — the 2026-08-29 launch
+    failure was one black-hole node (cpu-15) that accepted 416 jobs, failed
+    every one in ~1 s, and drained so fast it was always the next node free,
+    so it kept winning the queue (FOUNDATIONS.md 2026-08-31). Drop the flag
+    once UNR RC has repaired or drained the node.
     Raises ValueError if walltime exceeds the cluster's cap (14 d / 2 d).
     """
     walltime = walltime or profile.default_walltime
@@ -229,12 +239,14 @@ export OMP_NUM_THREADS=1
 #SBATCH --partition=%s
 #SBATCH --time=%s
 #SBATCH --output=%s
-#
+%s#
 # 2026 CP2K: container's OWN mpirun on a single node (NOT srun). See global CLAUDE.md.
 export OMP_NUM_THREADS=1
 SIF=%s
 """ % (job_name, ntasks or profile.ntasks, account, partition, walltime,
-       output, CP2K_SIF)
+       output,
+       ("#SBATCH --exclude=%s\n" % exclude_nodes) if exclude_nodes else "",
+       CP2K_SIF)
     return head + "\n".join(run_lines) + "\n"
 
 
@@ -539,6 +551,14 @@ fi
 COPYBACK_EXCLUDES = (
     "*.wfn", "*.wfn.bak-*", "*-RESTART.wfn", "*-RESTART.wfn.bak-*",
     "*.restart", "*.restart.bak-*",
+    # Optimizer Hessians are the same class as the restarts above: regenerable
+    # state, never paper data. Added 2026-09-02 after the Foundations
+    # Perlmutter pull broke on a timeout — 509 Hessians were HALF the 1.7 GB
+    # staging package, and merge_results.py's KEEP allowlist discards every one
+    # of them on arrival, so the whole 850 MB was transferred to be thrown away.
+    # They are also barred from Drive by standing policy: the 2026-07-01 cleanup
+    # purged all *-BFGS.Hessian to fit the 100 GB plan [[project_gdrive_sync]].
+    "*.Hessian", "*-BFGS.Hessian",
 )
 
 # The transfer scripts are ENVIRONMENT-ADAPTIVE (2026-07-10, feedback: Marcus's
@@ -618,6 +638,20 @@ def copy_back_script_text(remote_dir, profile=PRONGHORN, extra_excludes=(),
     whole tree each run and suppresses "file changed as we read it" warnings so
     a still-running campaign doesn't abort the pull.
 
+    The rsync branch is RESUMABLE ON A DROPPED LINK (2026-09-02): --partial
+    keeps the in-flight file so a re-run resumes instead of restarting it,
+    --timeout=300 turns a silently wedged transfer into a fast error, and the
+    ssh keepalive stops an idle-looking bulk transfer being reaped mid-stream.
+
+    ⚠ FLAGS HERE MUST BE **openrsync**-SAFE. macOS 15 replaced GNU rsync with
+    openrsync ("protocol version 29 / rsync 2.6.9 compatible"), so the modern
+    GNU-only options are absent — `--info=...` in particular exits 1 with a
+    usage dump. Verified present on openrsync and safe to use: -a -v -z -e
+    --partial --timeout= --exclude= --stats --prune-empty-dirs --list-only.
+    Each re-run costs a fresh 2FA prompt, so a long pull that must not die
+    halfway is better driven over ONE authenticated ssh ControlMaster socket
+    (see Foundations/migration/pull_perlmutter.sh) than by retrying this.
+
     remote_dir : source under the profile's remote_base (e.g.
         "tests/na_placement_multicomp"); pass an absolute path (leading '/') to
         use it verbatim (required for PERLMUTTER, whose base is unset).
@@ -648,7 +682,8 @@ REMOTE="%s"
 echo "pull  $HOST:$REMOTE/"
 echo "into  $DEST"
 if command -v rsync >/dev/null 2>&1; then
-  rsync -avz \\
+  rsync -avz --partial --timeout=300 \\
+    -e 'ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10' \\
 %s \\
     "$HOST:$REMOTE/" "$DEST"/
 else
