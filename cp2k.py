@@ -672,3 +672,62 @@ def read_last_cell_vectors(cell_file):
         return None
     v = [float(x) for x in last[2:11]]
     return [v[0:3], v[3:6], v[6:9]]
+
+
+# ── Job-directory hygiene (Foundations 2026-09-03) ─────────────────────────
+# A package generator that can be RE-RUN over a tree where some jobs have
+# already finished has exactly one dangerous failure mode: rewriting the
+# inputs while leaving the old outputs. The dir then looks converged, and the
+# stale result is silently adopted. That is what happened between the two
+# 2026-08-17 Foundations f3 gen runs (245 dirs), so both halves of the guard
+# live here now: clear the products whenever inputs are rewritten, and never
+# trust an output older than the inputs sitting beside it.
+# (Foundations/f3_guests.py keeps its own inlined copy — it is mid-campaign on
+# the cluster and is migrated when next touched, per zeolib README rule 4.)
+GENERATED_SUFFIXES = (".out", ".wfn", ".restart", ".Hessian",
+                      "-1.cell", "-pos-1.xyz", "-frc-1.xyz")
+GENERATED_PREFIXES = ("cp2k_", "slurm-")
+
+
+def clear_generated(job_dir, suffixes=GENERATED_SUFFIXES,
+                    prefixes=GENERATED_PREFIXES):
+    """
+    Delete CP2K products from `job_dir` so a rewritten job starts clean.
+    Returns the number of files removed; a missing dir is 0, not an error.
+
+    Call this on EVERY dir whose inputs you rewrite. Leaving the old `.out`
+    behind is not a cosmetic problem: the next pass reads it as a converged
+    result for inputs it never saw.
+    """
+    if not os.path.isdir(job_dir):
+        return 0
+    n = 0
+    for f in os.listdir(job_dir):
+        if f.endswith(suffixes) or f.startswith(prefixes):
+            try:
+                os.remove(os.path.join(job_dir, f))
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def output_is_current(job_dir, out_name, extra_inputs=("coords.inc",)):
+    """
+    True if `out_name` was written AFTER every input now in `job_dir`
+    (any `*.inp` plus `extra_inputs`). False when the output is missing.
+
+    Timestamps, not geometry: comparing a trajectory's first frame against
+    coords.inc looks appealing but is invalid — CP2K's first printed frame
+    differs from the input by ~0.1 A on a perfectly clean run, so no tolerance
+    separates "clean" from "stale".
+    """
+    out = os.path.join(job_dir, out_name)
+    if not os.path.exists(out):
+        return False
+    t_out = os.path.getmtime(out)
+    for f in os.listdir(job_dir):
+        if f.endswith(".inp") or f in tuple(extra_inputs):
+            if os.path.getmtime(os.path.join(job_dir, f)) > t_out:
+                return False
+    return True

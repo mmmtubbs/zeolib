@@ -23,6 +23,7 @@ Checks, in order:
  11. provenance version stamping (git sha, dirty detection, stamp files)
 """
 import os
+import shutil
 import sys
 import tempfile
 
@@ -803,6 +804,31 @@ EX_BASE = "/scratch/user/MOR"                 # ones are configured, not in git
 EX_PM_HOST = "user@perlmutter.example.gov"
 
 
+def test_job_hygiene():
+    print("[6c] cp2k job-directory hygiene (clear_generated / output_is_current)")
+    import tempfile, time
+    d = tempfile.mkdtemp()
+    for f in ("run.inp", "coords.inc", "run.out", "run-pos-1.xyz",
+              "run-RESTART.wfn", "cp2k_12345.out", "PRODUCT_INFO"):
+        open(os.path.join(d, f), "w").write("x")
+    n = cp2k.clear_generated(d)
+    left = sorted(os.listdir(d))
+    check("clear_generated removes products, keeps inputs and metadata",
+          n == 4 and left == ["PRODUCT_INFO", "coords.inc", "run.inp"])
+    check("clear_generated on a missing dir is 0, not an error",
+          cp2k.clear_generated(os.path.join(d, "nope")) == 0)
+    open(os.path.join(d, "run.out"), "w").write("x")
+    check("output_is_current: output newer than inputs",
+          cp2k.output_is_current(d, "run.out"))
+    time.sleep(0.01)
+    open(os.path.join(d, "coords.inc"), "w").write("y")   # input rewritten after
+    check("output_is_current: FALSE once an input is rewritten (the 245-dir bug)",
+          not cp2k.output_is_current(d, "run.out"))
+    check("output_is_current: FALSE when the output is missing",
+          not cp2k.output_is_current(d, "absent.out"))
+    shutil.rmtree(d)
+
+
 def test_slurm():
     print("[5] slurm generation")
     # Cluster identity is configured, never hardcoded (slurm.py "Cluster
@@ -1512,6 +1538,7 @@ def main():
     test_cation()
     test_cp2k_generation()
     test_cp2k_parsing()
+    test_job_hygiene()
     test_slurm()
     test_fileio()
     test_maceenv()
