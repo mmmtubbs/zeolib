@@ -301,7 +301,7 @@ def cation_set_distance(a, b, cell):
 
 
 def seed_cation_sets(fw, al_sites, n_seeds, cat_sym='Na', rng=None,
-                     dedupe_tol=0.75, max_draws=None, sort=True):
+                     dedupe_tol=0.75, max_draws=None, sort=True, n_draw=None):
     """
     Up to n_seeds DISTINCT UFF-relaxed cation placements for one Al
     arrangement — the Na-layer seeds of the Stage-1a successive-halving
@@ -313,6 +313,24 @@ def seed_cation_sets(fw, al_sites, n_seeds, cat_sym='Na', rng=None,
     to keep DRAW order, which is stable under extension: re-calling with the
     same rng seed and a larger n_seeds reproduces the earlier seeds at the
     same indices (what the successive-halving runner's resume relies on).
+
+    n_draw (UFF PRESCREEN, 2026-09-03): draw a FIXED pool of n_draw random
+    starts (plus the greedy start), relax + dedupe them all in draw order,
+    sort the pool by UFF energy and return its n_seeds lowest. The seeder's
+    own energy ranks a candidate's Na placements at within-candidate
+    Spearman +0.86 vs DFT (tests/na_placement_topk) and +0.65 vs MACE over
+    the 118 sixteen-seed Si15 production candidates; on that data the
+    UFF-best 2 of 16 cut the best-of-round-1 shortfall's P(>50 kJ) from
+    0.11 to 0.01 (MOR/STAGE1A_SCALEUP_REVIEW.md §1.4). Because the pool is
+    fixed by (rng, n_draw), seed k is the k-th lowest UFF placement whatever
+    n_seeds is, so extension is stable exactly as in draw-order mode — the
+    runner records n_draw and refuses to resume under a different value.
+    `sort` is meaningless here (the pool IS energy-ordered); `max_draws` is
+    ignored. Cost ~0.08 s per draw (MOR, 4 Al). Numerical caveat: the L-BFGS
+    minima differ at the 1e-3 level across BLAS builds, so a pool generated
+    on one machine is only reproducible on that machine — all shards of a
+    ranking must run on one cluster (tests/angular found this the hard way).
+    n_draw=None is the legacy draw-order path, byte-identical to before.
     """
     import random as _random
     rng = rng or _random.Random(0)
@@ -328,6 +346,16 @@ def seed_cation_sets(fw, al_sites, n_seeds, cat_sym='Na', rng=None,
         return True
 
     try_add(place_cations_near_al(fw, al_sites))
+    if n_draw is not None:
+        if int(n_draw) < 1:
+            raise ValueError("n_draw must be >= 1, got %r" % (n_draw,))
+        for _ in range(int(n_draw)):
+            try_add(place_cations_near_al(fw, al_sites, rng=rng))
+        # stable sort: ties (rare, but relax_cations can land in the same
+        # basin from two starts) keep draw order, so the result is a pure
+        # function of (rng, n_draw)
+        kept.sort(key=lambda t: t[1])
+        return kept[:n_seeds]
     draws = 0
     max_draws = max_draws or n_seeds * 8
     while len(kept) < n_seeds and draws < max_draws:

@@ -447,6 +447,31 @@ def test_cation():
           len(seeds) >= 2
           and all(seeds[i][1] <= seeds[i + 1][1] for i in range(len(seeds) - 1))
           and all(d >= 0.75 for d in dists))
+    # UFF prescreen (2026-09-03, Si11 launch): the pool is a pure function of
+    # (rng, n_draw), so seed k is the same whatever n_seeds is — the
+    # extension stability mace_rank's successive-halving resume relies on
+    p2 = cation.seed_cation_sets(fw, al, 2, rng=random.Random(11), n_draw=12)
+    p6 = cation.seed_cation_sets(fw, al, 6, rng=random.Random(11), n_draw=12)
+    check("prescreen: seeds 0-1 identical at n_seeds=2 and 6 (extension-stable)",
+          len(p2) == 2 and len(p6) >= 2
+          and all(np.allclose(p2[i][0], p6[i][0]) and p2[i][1] == p6[i][1]
+                  for i in range(2)))
+    check("prescreen: pool is UFF-energy ordered, deduped, <= n_seeds",
+          len(p6) <= 6
+          and all(p6[i][1] <= p6[i + 1][1] for i in range(len(p6) - 1))
+          and all(cation.cation_set_distance(p6[i][0], p6[j][0], fw["cell"])
+                  >= 0.75 for i in range(len(p6)) for j in range(i + 1, len(p6))))
+    leg = cation.seed_cation_sets(fw, al, 4, rng=random.Random(11), n_draw=None)
+    check("prescreen off (n_draw=None): legacy draw-order path, deterministic",
+          len(leg) == len(seeds)
+          and all(np.allclose(leg[i][0], seeds[i][0]) and leg[i][1] == seeds[i][1]
+                  for i in range(len(seeds))))
+    try:
+        cation.seed_cation_sets(fw, al, 2, rng=random.Random(1), n_draw=0)
+        raised = False
+    except ValueError:
+        raised = True
+    check("prescreen: n_draw < 1 raises (rule 7)", raised)
     at = cation.assemble_atoms(fw, al, seeds[0][0])
     ss = at.get_chemical_symbols()
     check("assemble_atoms: 3 Al substituted, 3 Na appended last",
