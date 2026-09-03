@@ -166,3 +166,57 @@ def ring_normal_sites(fw, ring, offset=2.0):
     _, _, vt = np.linalg.svd(pos - cen)
     n = vt[2]
     return np.array([cen + offset * n, cen - offset * n])
+
+
+def fibonacci_directions(n=200):
+    """`n` near-uniform unit vectors on the sphere (deterministic golden-angle
+    spiral). Used to search bonding directions around a host atom without an
+    RNG, so a generated start is reproducible byte-for-byte."""
+    k = np.arange(n) + 0.5
+    phi = np.arccos(1.0 - 2.0 * k / n)
+    theta = np.pi * (1.0 + 5.0 ** 0.5) * k
+    return np.stack([np.cos(theta) * np.sin(phi),
+                     np.sin(theta) * np.sin(phi),
+                     np.cos(phi)], axis=1)
+
+
+def bond_site(host_pos, cell, anchor, distance, exclude=(), n_dir=200,
+              clash=CLASH_DIST):
+    """
+    Where to put a fragment atom that is BONDED to host atom `anchor` at
+    `distance` Å: the direction (of `n_dir` sphere directions) that maximises
+    the atom's clearance from every other host atom, so the fragment points
+    into the pore rather than into the wall.
+
+    `exclude`: host indices to ignore in the clearance test — the anchor is
+    always ignored (it is the bond partner), and a second anchor is passed
+    here when placing the other half of a dissociated pair.
+
+    Returns (position (3,), clearance) — clearance = MIC distance to the
+    nearest non-excluded host atom, `inf` when nothing is left to clash with —
+    or (None, None) if no direction clears `clash`.
+
+    Added for the Foundations dissociation probe (2026-09-03): the f3 site
+    templates place a WHOLE molecule at a void anchor, which can only find a
+    dissociated product by accident. This builds the product directly — H on
+    a framework O at the measured Brønsted O-H, halide on a cation at the
+    measured M-X — from geometry alone, with no RNG and no MD. Same
+    "point away from the local mass" idea as cation.place_cations_near_al,
+    kept separate because that function's output is byte-parity pinned
+    against mor_core.
+    """
+    host_pos = np.asarray(host_pos, float)
+    anchor = int(anchor)
+    skip = set(int(i) for i in exclude) | {anchor}
+    keep = np.array([i for i in range(len(host_pos)) if i not in skip])
+    cands = host_pos[anchor] + float(distance) * fibonacci_directions(n_dir)
+    if not len(keep):
+        # nothing to clash with: every direction is equally free. Return the
+        # first (deterministic) one with infinite clearance rather than
+        # letting an empty min() decide it.
+        return cands[0].copy(), float("inf")
+    d = mic_all(cands, host_pos[keep], cell).min(axis=1)
+    best = int(np.argmax(d))
+    if d[best] < clash:
+        return None, None
+    return cands[best].copy(), float(d[best])

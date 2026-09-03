@@ -1193,6 +1193,39 @@ def test_molecules():
           and all(molecules.guest_natoms(g) == len(molecules.guest_positions(g)[1])
                   for g in want_nat)
           and molecules.guest_natoms("NO3") != len(molecules.guest_elements("NO3")))
+    # adsorption-state classifier (Foundations 2026-09-03)
+    want_nb = {"I2": 1, "HI": 1, "CH3I": 4, "H2O": 2, "Cl2": 1, "NO2": 2, "NO3": 3}
+    check("template_bonds: exactly the chemical bonds per guest",
+          all(len(molecules.template_bonds(g)) == n for g, n in want_nb.items()))
+    box = np.diag([20.0, 20.0, 20.0])
+    _, hi = molecules.guest_positions("HI")
+    st = molecules.adsorption_state("HI", hi, box)
+    hi2 = hi.copy(); hi2[1, 2] += 0.66          # H-I 1.609 -> 2.27 (the Ag_11 winner)
+    st2 = molecules.adsorption_state("HI", hi2, box)
+    check("adsorption_state: template molecular (ratio 1.00), +0.66 Å dissociated (1.41)",
+          st["state"] == "molecular" and abs(st["max_ratio"] - 1.0) < 1e-9
+          and st2["state"] == "dissociated" and abs(st2["max_ratio"] - 2.27 / 1.609) < 1e-3
+          and st2["bond"][2:4] == ("H", "I"))
+    hi3 = hi.copy(); hi3[1, 2] += 20.0            # same bond across a periodic image
+    check("adsorption_state measures bonds minimum-image",
+          molecules.adsorption_state("HI", hi3, box)["state"] == "molecular")
+    try:
+        molecules.adsorption_state("HI", hi[:1], box); bad = False
+    except ValueError:
+        bad = True
+    check("adsorption_state raises on a wrong atom count (rule 7)", bad)
+    fr = os.path.join(ZROOT, "Foundations", "f3_binding", "pkg_FAU", "Ag_11", "HI",
+                      "full_6r0m", "full-opt-pos-1.xyz")
+    if os.path.exists(fr):
+        from ase.io import read as _read
+        at = _read(fr, index=-1)
+        cellm = np.array([[17.3330805024, 0, 0], [8.6665402512, 15.0108880409, 0],
+                          [8.6665402512, 5.003629347, 14.1524009672]])
+        st = molecules.adsorption_state("HI", at.get_positions()[-2:], cellm)
+        check("real FAU Ag_11 HI 6r0m winner classifies dissociated (H-I 2.27 Å)",
+              st["state"] == "dissociated" and abs(st["bond"][4] - 2.27) < 0.01)
+    else:
+        print("  (FAU Ag_11 HI frame missing — real-frame pin skipped)")
     # composition parity with the frozen FAU-era seed xyzs (overlapping names)
     bm = os.path.join(ZROOT, "FAU", "BindingEnergies", "BindingMolecules")
     if os.path.isdir(bm):
@@ -1304,6 +1337,39 @@ def test_placement():
           pts.shape == (2, 3)
           and abs(np.linalg.norm(pts[0] - pts[1]) - 4.0) < 1e-9
           and np.allclose((pts[0] + pts[1]) / 2.0, cen, atol=1e-9))
+
+
+def test_bond_site():
+    print("[8b] placement.bond_site (directed product-state construction)")
+    from zeolib import placement
+    dirs = placement.fibonacci_directions(200)
+    check("fibonacci_directions: 200 unit vectors, deterministic, spread",
+          dirs.shape == (200, 3)
+          and abs(np.linalg.norm(dirs, axis=1) - 1).max() < 1e-12
+          and np.allclose(dirs, placement.fibonacci_directions(200))
+          and abs(dirs.mean(axis=0)).max() < 0.05)
+    # a wall of atoms in the z<0 half-space: the bond site must point +z
+    cell = np.diag([20.0, 20.0, 20.0])
+    wall = np.array([[x, y, -2.0] for x in range(-4, 5) for y in range(-4, 5)]
+                    + [[0.0, 0.0, 0.0]], float)
+    anchor = len(wall) - 1
+    pos, clr = placement.bond_site(wall, cell, anchor, 1.0)
+    check("bond_site: bonds at the requested distance, away from the wall",
+          pos is not None and abs(np.linalg.norm(pos - wall[anchor]) - 1.0) < 1e-9
+          and pos[2] > 0.9 and clr > placement.CLASH_DIST)
+    # fully enclosed anchor -> no direction clears the clash floor
+    shell = np.array([[0.0, 0.0, 0.0]] + list(1.9 * placement.fibonacci_directions(60)))
+    p2, c2 = placement.bond_site(shell, cell, 0, 1.0)
+    check("bond_site: returns (None, None) when every direction clashes",
+          p2 is None and c2 is None)
+    # exclude lets the partner atom be ignored in the clearance test
+    pair = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.2]])
+    p3, _ = placement.bond_site(pair, cell, 0, 1.0)
+    p4, c4 = placement.bond_site(pair, cell, 0, 1.0, exclude=[1])
+    check("bond_site: exclude ignores the named host atom "
+          "(and an empty neighbour set gives infinite clearance)",
+          p3 is not None and p3[2] < -0.9
+          and p4 is not None and np.isinf(c4))
 
 
 def test_constants_combos():
@@ -1451,6 +1517,7 @@ def main():
     test_maceenv()
     test_molecules()
     test_placement()
+    test_bond_site()
     test_constants_combos()
     test_provenance()
     print()
