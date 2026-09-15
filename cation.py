@@ -30,7 +30,7 @@ import itertools
 import numpy as np
 
 from .geometry import (mic_dist, mic_vec, mic_all, centroid_unwrapped,
-                       cell_matrix, perp_widths, wrap_to_cell)
+                       cell_matrix, perp_widths, wrap_to_cell, DEDUPE_TOL_ANG)
 
 # ── Physical / model constants (mor_core values, unchanged) ─────────────────
 COULOMB_K = 332.0637          # kcal/mol·Å/e²
@@ -301,7 +301,8 @@ def cation_set_distance(a, b, cell):
 
 
 def seed_cation_sets(fw, al_sites, n_seeds, cat_sym='Na', rng=None,
-                     dedupe_tol=0.75, max_draws=None, sort=True, n_draw=None):
+                     dedupe_tol=DEDUPE_TOL_ANG, max_draws=None, sort=True,
+                     n_draw=None):
     """
     Up to n_seeds DISTINCT UFF-relaxed cation placements for one Al
     arrangement — the Na-layer seeds of the Stage-1a successive-halving

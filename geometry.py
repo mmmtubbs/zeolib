@@ -18,6 +18,8 @@ Provenance: tests/na_placement_multicomp/common.py (mic, mic_all),
 MOR/binding/run_range_all.py (centroid_unwrapped — the PBC centroid bug fix),
 MOR/pipeline_archive/stage1a_v1/mor_core.py (mic_vec, min/mean pair
 distances). General-cell dispatch new for Foundations (FAU leg).
+`species_match_max_disp` / `same_structure` (permutation-invariant structure
+comparison) new for the Stage-1a v2 top-K carry-k dedup, 2026-09-10.
 """
 import numpy as np
 
@@ -218,6 +220,106 @@ def is_collapsed(positions, cell, floor=COLLAPSE_FLOOR_ANG):
     ~1.58 Å; an O-H would be ~0.97), so it can only fire on genuine collapse.
     """
     return bool(min_pair_dist(positions, cell) < float(floor))
+
+
+# Two placements of the same composition count as ONE structure when a
+# per-species atom matching maps one onto the other inside this MIC
+# displacement (Å). Same number as cation.seed_cation_sets' `dedupe_tol`,
+# which asks the same question of the UFF SEEDS that same_structure asks of
+# the RELAXED geometries — one tolerance, one home.
+DEDUPE_TOL_ANG = 0.75
+
+
+def _species_groups(syms_a, syms_b):
+    """{element: (indices into a, indices into b)} — None when the two
+    structures do not even have the same composition."""
+    ia, ib = {}, {}
+    for d, syms in ((ia, syms_a), (ib, syms_b)):
+        for i, s in enumerate(np.asarray(syms).ravel().tolist()):
+            d.setdefault(str(s), []).append(i)
+    if set(ia) != set(ib) or any(len(ia[k]) != len(ib[k]) for k in ia):
+        return None
+    return dict((k, (ia[k], ib[k])) for k in ia)
+
+
+def species_match_max_disp(syms_a, pos_a, syms_b, pos_b, cell):
+    """
+    Largest MIC atom displacement between two structures under the best
+    (minimum-TOTAL-distance) matching of like species — a
+    PERMUTATION-INVARIANT structural distance. Exactly 0.0 for two structures
+    that differ only by a relabeling of identical atoms; `inf` when the two do
+    not have the same composition.
+
+    Atoms of one species are physically indistinguishable, so an index-order
+    comparison (`max |pos_a - pos_b|`) reports two labelings of ONE structure
+    as different placements. This is the number to log; `same_structure` is
+    the tolerance test, and it does NOT use this value (see there).
+
+    Provenance: Stage-1a v2 Si11 ranking, 2026-09-10. mace_rank's DFT carry-k
+    kept the K lowest-energy Na SEEDS per arrangement with no geometric test,
+    so seeds that relax into one basin ship as separate CP2K jobs. Measured
+    over MOR/pipeline/stage1a_v2/ship_rank_si11/Si11/topk_geoms.extxyz (6,954
+    arrangements, 7,465 within-arrangement pairs): 1,687 pairs (22.6 %, in
+    20 % of arrangements) sit below DEDUPE_TOL_ANG — 330 of them ONLY under a
+    permutation-invariant test, and another 143 only once MIC is applied.
+    """
+    grp = _species_groups(syms_a, syms_b)
+    if grp is None:
+        return np.inf
+    from scipy.optimize import linear_sum_assignment
+    pa, pb = np.asarray(pos_a, float), np.asarray(pos_b, float)
+    worst = 0.0
+    for el, (ja, jb) in sorted(grp.items()):
+        D = mic_all(pa[ja], pb[jb], cell)
+        r, c = linear_sum_assignment(D)
+        worst = max(worst, float(D[r, c].max()))
+    return worst
+
+
+def same_structure(syms_a, pos_a, syms_b, pos_b, cell, tol=DEDUPE_TOL_ANG):
+    """
+    True iff SOME matching of like species maps structure a onto structure b
+    with EVERY atom moved less than `tol` Å (MIC) — the permutation-invariant
+    "these two are the same placement" test. Different compositions are never
+    the same structure.
+
+    EXACT, not a heuristic. Minimising the TOTAL displacement (what
+    `species_match_max_disp` reports) can in principle return a matching whose
+    worst atom exceeds `tol` while a feasible matching exists, so the decision
+    is a bipartite PERFECT MATCHING on the "within tol" graph: the assignment
+    is run over the 0/1 cost `D >= tol`, and a total cost of 0 means every
+    atom found a partner inside `tol`. The cheap Hausdorff necessary condition
+    (every atom must have SOME partner within tol) runs first and rejects
+    virtually every non-match without touching scipy.
+
+    NOT invariant under framework SYMMETRY operations: two placements related
+    by a space-group operation of the host are physically equivalent and
+    degenerate in energy, but are different point sets and stay distinct here
+    (Stage-1a Si11 c07066 seeds 7 and 15 are such a pair — identical MACE
+    energy to the last float32 bit, 3.68 Å apart under this metric).
+
+    Provenance: as species_match_max_disp.
+    """
+    grp = _species_groups(syms_a, syms_b)
+    if grp is None:
+        return False
+    tol = float(tol)
+    pa, pb = np.asarray(pos_a, float), np.asarray(pos_b, float)
+    mats = []
+    for el, (ja, jb) in sorted(grp.items()):
+        D = mic_all(pa[ja], pb[jb], cell)
+        if D.size and (D.min(axis=1).max() >= tol or D.min(axis=0).max() >= tol):
+            return False                 # Hausdorff: some atom has no partner
+        mats.append(D)
+    from scipy.optimize import linear_sum_assignment
+    for D in mats:
+        if not D.size:
+            continue
+        cost = (D >= tol).astype(float)
+        r, c = linear_sum_assignment(cost)
+        if cost[r, c].sum() > 0.0:       # no perfect matching inside tol
+            return False
+    return True
 
 
 def mean_pair_dist(positions, cell):

@@ -5,7 +5,9 @@ change:  python zeolib/selftest.py   (from Zeolites/, or anywhere)
 
 Checks, in order:
   1. geometry MIC vs brute-force image search + the PBC-centroid regression
-     case; general-cell (FAU rhombohedral) MIC vs ase.geometry.get_distances
+     case; general-cell (FAU rhombohedral) MIC vs ase.geometry.get_distances;
+     permutation-invariant structure comparison on the measured Stage-1a
+     c07066 duplicate/symmetry pair
   2. framework loader on the official MOR baseline (counts, orbits,
      Löwenstein); FAU fixture load (general cell) + t_rings
   3. CP2K input builders reproduce the staged na_placement_multicomp inputs
@@ -174,6 +176,59 @@ def test_geometry():
     check("wrap_to_cell: fractionals in [0,1), MIC distances preserved",
           fwr.min() >= -1e-12 and fwr.max() < 1.0
           and np.allclose(geometry.mic_all(wr, Q2, M), D2, atol=1e-9))
+
+    # ── permutation-invariant structure comparison ──────────────────────────
+    # The Stage-1a v2 carry-k dedup (mace_rank.topk_seeds, 2026-09-10). Numbers
+    # below are MEASURED on ship_rank_si11/Si11/topk_geoms.extxyz, candidate
+    # c07066: seeds 15 and 9 are one placement seen twice (Na 0.3209 A apart
+    # under the matching, 4.3177 A in index order) while seeds 7 and 15 are a
+    # SYMMETRY-related pair — bit-identical MACE energy, 3.6841 A apart — that
+    # must stay distinct, since this metric is not symmetry-aware.
+    cellp = np.array([17.8481395059, 20.6994211544, 7.5791549307])
+    sy = ["Si", "O", "Na", "Na", "Na"]
+    p0 = np.array([[1.0, 1.0, 1.0], [2.583, 1.0, 1.0], [5.0, 5.0, 0.10],
+                   [8.0, 9.0, 3.0], [12.0, 15.0, 6.0]])
+    perm = [0, 1, 4, 2, 3]                      # relabel the three Na only
+    p1 = p0[perm]
+    check("species_match_max_disp: 0 for a pure Na relabeling",
+          geometry.species_match_max_disp(sy, p0, sy, p1, cellp) < 1e-12)
+    check("  (index-order comparison DOES see that relabeling — meaningful)",
+          np.abs(p0 - p1).max() > 5.0)
+    check("same_structure: TRUE for a pure Na relabeling",
+          geometry.same_structure(sy, p0, sy, p1, cellp) is True)
+    p2 = p1.copy()
+    p2[0] = [1.0, 1.0, 1.0 + cellp[2] - 0.13]   # Si stepped across the c face
+    check("same_structure honours MIC (0.13 A across the c face, not 7.45 A)",
+          geometry.same_structure(sy, p0, sy, p2, cellp) is True
+          and abs(geometry.species_match_max_disp(sy, p0, sy, p2, cellp)
+                  - 0.13) < 1e-9
+          and np.abs(p0 - p2).max() > 7.4)
+    p3 = p0.copy()
+    p3[2] = p0[2] + [0.0, 0.0, 3.6841299695437564]   # the measured s7/s15 gap
+    check("same_structure FALSE at the measured c07066 s7/s15 gap (3.68 A)",
+          geometry.same_structure(sy, p0, sy, p3, cellp) is False
+          and abs(geometry.species_match_max_disp(sy, p0, sy, p3, cellp)
+                  - 3.6841299695437564) < 1e-9)
+    check("  (default tol sits between the two — guard is meaningful)",
+          0.3209 < geometry.DEDUPE_TOL_ANG < 3.6841)
+    p4 = p0.copy()
+    p4[2] = p0[2] + [0.32, 0.0, 0.0]            # the measured s15/s9 offset
+    check("same_structure TRUE at the measured c07066 s15/s9 offset (0.32 A)",
+          geometry.same_structure(sy, p0, sy, p4, cellp) is True)
+    check("same_structure FALSE across a composition change",
+          geometry.same_structure(sy, p0, ["Si", "O", "Na", "Na", "Al"], p0,
+                                  cellp) is False
+          and geometry.species_match_max_disp(
+              sy, p0, ["Si", "O", "Na", "Na", "Al"], p0, cellp) == np.inf)
+    # min-TOTAL matching can pick a worst atom above tol where a feasible
+    # matching exists; the decision is a perfect matching, so it must not.
+    syb = ["Na", "Na"]
+    b0 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    b1 = np.array([[0.55, 0.0, 0.0], [0.60, 0.0, 0.0]])
+    check("same_structure decides by MATCHING, not by the min-sum worst atom",
+          geometry.same_structure(syb, b0, syb, b1, cellp, tol=0.75) is True)
+    check("same_structure respects an explicit tol",
+          geometry.same_structure(sy, p0, sy, p4, cellp, tol=0.1) is False)
 
 
 def test_framework():
