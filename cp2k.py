@@ -731,3 +731,91 @@ def output_is_current(job_dir, out_name, extra_inputs=("coords.inc",)):
             if os.path.getmtime(os.path.join(job_dir, f)) > t_out:
                 return False
     return True
+
+
+_ABS_SPIN = re.compile(r"Integrated absolute spin density:\s+([-\d.Ee+]+)")
+
+
+def read_abs_spin_density(out_path):
+    """
+    The LAST ``Integrated absolute spin density`` value (electrons) printed by a
+    spin-unrestricted run, or None when the line never appears (an RKS run, or
+    a job that died before its first SCF finished).
+
+    This is the integral of |rho_alpha - rho_beta| over the cell: the direct,
+    basis-independent measure of how much unpaired spin the solution carries. A
+    bare-UKS closed-shell system that stayed closed-shell prints ~1e-9; a
+    broken-symmetry one prints O(1).
+
+    Provenance: Foundations f5 (2026-09-17). The all-UKS rescore of the
+    Foundations table needed a diagnostic that separates a GENUINE
+    broken-symmetry solution from a cold-start SCF that merely landed on a
+    worse one, because on a multiplicity-1 term E_UKS <= E_RKS makes a positive
+    dE provably an instrument fault. Spin settles it: the 24 real instabilities
+    all carry O(1) spin while every cold-start artifact carries exactly 0.
+    """
+    if not os.path.exists(out_path):
+        return None
+    val = None
+    with open(out_path, errors="replace") as fh:
+        for ln in fh:
+            m = _ABS_SPIN.search(ln)
+            if m:
+                val = float(m.group(1))
+    return val
+
+
+def read_mulliken_spin(out_path):
+    """
+    Per-atom Mulliken populations from the LAST ``Mulliken Population
+    Analysis`` block: list of ``(index, element, net_charge, spin_moment)``,
+    or None when no block is present.
+
+    LAST block wins, matching `final_energy_ha` and `read_forces_au` — a dir
+    re-run in place holds several, and only the final one describes the
+    reported energy.
+
+    The spin-unrestricted header is ``Atomic population (alpha,beta) Net charge
+    Spin moment`` (6 numeric columns after the element/kind); an RKS run prints
+    only ``Atomic population  Net charge`` (2 columns) and then spin_moment
+    comes back None per row, so a caller summing |spin| must guard for it
+    rather than read a zero that was never computed.
+
+    Provenance: Foundations f5 (2026-09-17), together with
+    `read_abs_spin_density` — the per-atom breakdown is what attributes an
+    instability to specific atoms (e.g. Cu 1.09 + Cl 0.30 for the Cu(I)->Cl2
+    charge transfer), which the integrated number alone cannot do.
+    """
+    if not os.path.exists(out_path):
+        return None
+    blocks, rows, inside = [], [], False
+    with open(out_path, errors="replace") as fh:
+        for ln in fh:
+            if "Mulliken Population Analysis" in ln:
+                if rows:
+                    blocks.append(rows)
+                rows, inside = [], True
+                continue
+            if not inside:
+                continue
+            if "Total charge and spin" in ln or "Total charge" in ln:
+                inside = False
+                if rows:
+                    blocks.append(rows)
+                    rows = []
+                continue
+            p = ln.split()
+            # "<idx> <El> <kind> <alpha> <beta> <net> <spin>" (UKS) or
+            # "<idx> <El> <kind> <pop> <net>" (RKS)
+            if len(p) >= 5 and p[0].isdigit() and not p[1].isdigit():
+                try:
+                    if len(p) >= 7:
+                        rows.append((int(p[0]), p[1], float(p[5]),
+                                     float(p[6])))
+                    else:
+                        rows.append((int(p[0]), p[1], float(p[4]), None))
+                except ValueError:
+                    pass
+    if rows:
+        blocks.append(rows)
+    return blocks[-1] if blocks else None

@@ -829,6 +829,44 @@ def test_cp2k_parsing():
     st = cp2k.read_stress_ase_ev_ang3(d)
     check("stress parsed: 9 components, |tr| < 1 eV/A^3",
           st is not None and len(st) == 9 and abs(st[0] + st[4] + st[8]) < 1.0)
+
+    # ── spin diagnostics on real bare-UKS f5 outputs (Foundations 2026-09-17).
+    # Two REAL frames pinned, one closed-shell and one broken-symmetry, because
+    # the whole point of these parsers is to tell those two apart: the all-UKS
+    # rescore decides which of two energies to trust from the spin, so a parser
+    # that silently returned 0 would convert a physics result into a bug.
+    f5p = os.path.join(ZROOT, "Foundations", "f5_uks_rescore", "pkg")
+    pairs = [("f3_MOR_Cu_4.33_Cl2_full_12r", False),
+             ("f3_MOR_Cu_4.33_Cl2_full_8rY", True)]
+    if all(os.path.exists(os.path.join(f5p, j, "energy-force.out"))
+           for j, _ in pairs):
+        for job, broken in pairs:
+            o = os.path.join(f5p, job, "energy-force.out")
+            a = cp2k.read_abs_spin_density(o)
+            mull = cp2k.read_mulliken_spin(o)
+            s = sum(abs(r[3]) for r in mull) if mull else None
+            if broken:
+                check("read_abs_spin_density: broken symmetry on %s (1.95)"
+                      % job, a is not None and 1.9 < a < 2.0, a)
+                check("  Mulliken sum|spin| agrees it is polarised (1.59)",
+                      s is not None and 1.4 < s < 1.8, s)
+                check("  top spin carrier is a Cu (Cu->Cl2 charge transfer)",
+                      max(mull, key=lambda r: abs(r[3]))[1] == "Cu")
+            else:
+                check("read_abs_spin_density: closed shell on %s (~1e-9)"
+                      % job, a is not None and a < 1e-6, a)
+                check("  Mulliken sum|spin| is 0 there too",
+                      s is not None and s < 1e-4, s)
+            check("  Mulliken rows == atom count in coords.inc",
+                  mull is not None and len(mull) == len(
+                      fileio.read_coords_inc(
+                          os.path.join(f5p, job, "coords.inc"))[0]))
+        # An RKS output has no spin column and no spin-density line: both
+        # parsers must say so rather than hand back a zero nobody computed.
+        check("read_abs_spin_density -> None on an RKS output",
+              cp2k.read_abs_spin_density(out) is None)
+    else:
+        print("  (f5 outputs missing — spin-parser checks skipped)")
     train = os.path.join(ZROOT, "MOR", "tests", "na_training_set", "train_1500.xyz")
     if os.path.exists(train) and e is not None:
         tag = "energy=%.8f" % (e * constants.HARTREE_TO_EV)
