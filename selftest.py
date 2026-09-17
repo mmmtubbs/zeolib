@@ -677,6 +677,20 @@ def test_cp2k_generation():
     check("  (default inputs carry no OUTER_SCF, MAX_SCF 3000 intact)",
           "&OUTER_SCF" not in gen_geo and "&OUTER_SCF" not in gen_cell
           and "      MAX_SCF 3000\n" in gen_geo)
+    # ── PRESSURE_TOLERANCE (2026-09-17, tests/cell_treatment_si11) ──────────
+    # Repeat CELL_OPT of ONE Na basin scatters by mean 6.9 / max 33.1 kJ/mol
+    # while every run reports CONVERGED; CP2K's default accepts a 200-bar-wide
+    # window. The knob must stay OFF by default so every production input keeps
+    # its byte-parity above, and must be the ONLY change when it is set.
+    tight = cp2k.cell_opt_input(cell, elements, pressure_tolerance=10)
+    check("pressure_tolerance=10 emits PRESSURE_TOLERANCE inside &CELL_OPT",
+          "    PRESSURE_TOLERANCE 10\n" in tight
+          and tight.index("PRESSURE_TOLERANCE") < tight.index("&END CELL_OPT"))
+    check("  (pressure_tolerance is OFF by default — production byte-parity)",
+          "PRESSURE_TOLERANCE" not in gen_cell)
+    check("  (setting it changes NOTHING else in the input)",
+          [l for l in tight.splitlines() if "PRESSURE_TOLERANCE" not in l]
+          == gen_cell.splitlines())
     resc = cp2k.geo_opt_input(cell, elements,
                               restart_from="cell-opt-1.restart",
                               wfn_restart="cell-opt-RESTART.wfn",

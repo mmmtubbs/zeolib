@@ -237,7 +237,7 @@ def cell_opt_input(cell_abc, elements, basis_rel="../../../", project="cell-opt"
                    optimizer="LBFGS", max_iter=3000,
                    keep_angles=True, keep_symmetry=False,
                    angles=(90.0, 90.0, 90.0), symmetry="ORTHORHOMBIC",
-                   scf_outer=None, **dft_kw):
+                   scf_outer=None, pressure_tolerance=None, **dft_kw):
     """
     Variable-cell relax, production protocol. Defaults reproduce the
     na_placement_multicomp stage-1 input byte-for-byte: MOTION-level per-step
@@ -246,12 +246,24 @@ def cell_opt_input(cell_abc, elements, basis_rel="../../../", project="cell-opt"
     keep_symmetry: ONLY for bare-framework re-baselines — an Al/Na decoration
     lowers the space group, so decorated cells must relax with KEEP_ANGLES only.
     angles/symmetry: passed to subsys_section (FAU rhombohedral support).
+
+    pressure_tolerance (bar, 2026-09-17): emits PRESSURE_TOLERANCE. None keeps
+    CP2K's default, which is what every production Stage-1a input used and what
+    the selftest pins byte-for-byte — pass a value ONLY for a deliberate
+    convergence study. Added for MOR/tests/cell_treatment_si11, which measured
+    that repeat CELL_OPT of the SAME Na basin scatters by mean 6.9 / max 33.1
+    kJ/mol while every run reports CONVERGED: with the default the run is
+    accepted anywhere in a 200-bar-wide pressure window, and the arm that
+    tightens this separates "tolerance too loose" from "stress numerically
+    noisy" (README STATUS 2026-09-17).
     """
     keep = ""
     if keep_symmetry:
         keep += "    KEEP_SYMMETRY TRUE\n"
     if keep_angles:
         keep += "    KEEP_ANGLES TRUE\n"
+    if pressure_tolerance is not None:
+        keep += "    PRESSURE_TOLERANCE %g\n" % float(pressure_tolerance)
     head = """\
 &GLOBAL
   PROJECT %s
