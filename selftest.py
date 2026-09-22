@@ -929,6 +929,96 @@ def test_cp2k_parsing():
         check("stress: unknown unit RAISES (no silent None)", False)
     except ValueError:
         check("stress: unknown unit RAISES (no silent None)", True)
+    # read_input_cell: round-trip through the builder's own &CELL block
+    # (ortho default + the FAU rhombohedral form), then a real FAU full-opt.
+    td = tempfile.mkdtemp()
+    for ang, sym in (((90.0, 90.0, 90.0), "ORTHORHOMBIC"),
+                     ((60.0, 60.0, 60.0), "RHOMBOHEDRAL")):
+        fp = os.path.join(td, "cell_%s.inp" % sym)
+        with open(fp, "w") as fh:
+            fh.write(cp2k.subsys_section((17.6871, 20.1546, 7.4159), ["Si", "O"],
+                                         angles=ang, symmetry=sym))
+        c = cp2k.read_input_cell(fp)
+        check("read_input_cell round-trips subsys_section (%s)" % sym,
+              c["abc"] == [17.6871, 20.1546, 7.4159] and c["angles"] == list(ang))
+    c = cp2k.read_input_cell(os.path.join(td, "cell_ORTHORHOMBIC.inp"))
+    check("read_input_cell: orthorhombic matrix is diag(ABC)",
+          np.allclose(c["matrix"], np.diag([17.6871, 20.1546, 7.4159])))
+    fp = os.path.join(td, "nocell.inp")
+    with open(fp, "w") as fh:
+        fh.write("&CELL\n  PERIODIC XYZ\n&END CELL\n")
+    try:
+        cp2k.read_input_cell(fp); raised = False
+    except ValueError:
+        raised = True
+    check("read_input_cell RAISES on a &CELL with no ABC (rule 7)", raised)
+    fr = os.path.join(ZROOT, "Foundations", "f3_binding", "pkg_FAU", "Ag_11", "HI",
+                      "full_6r0m", "full-opt.inp")
+    if os.path.exists(fr):
+        c = cp2k.read_input_cell(fr)
+        check("real FAU Ag_11 full-opt cell = the f2 rhombohedral cell (1e-3 Å)",
+              np.allclose(c["matrix"],
+                          [[17.3330805024, 0, 0], [8.6665402512, 15.0108880409, 0],
+                           [8.6665402512, 5.003629347, 14.1524009672]], atol=1e-3))
+    else:
+        print("  (FAU Ag_11 full-opt.inp missing — real-cell pin skipped)")
+    # opt_frame_cells: the f2 chain of MOR Cu_5 (cell-opt: 237 frames over
+    # 236 .cell rows, the last a re-print; geo-opt: RESTART_CELL from the cell-opt, whose input ABC
+    # is the STARTING cell) and a self-restarting fixed-cell screen.
+    d2 = os.path.join(ZROOT, "Foundations", "f2_exchange", "pkg_MOR", "Cu_5")
+    if os.path.exists(os.path.join(d2, "cell-opt-1.cell")):
+        ci, cf = (os.path.join(d2, "cell-opt.inp"),
+                  os.path.join(d2, "cell-opt-1.cell"))
+        cc = cp2k.opt_frame_cells(ci, 237, cell_file=cf)
+        # frame 1 is AFTER step 1 (its E is the 2nd evaluation in the .out),
+        # so it sits at .cell row 1, not the input cell; the extra last frame
+        # is the final re-print at the last row.
+        check("opt_frame_cells: cell-opt frame k = .cell row k, re-print = last row",
+              np.allclose(cc[0], np.diag([17.9226970086, 20.3449796413,
+                                          7.4530057516]))
+              and np.allclose(cc[-1], np.diag([17.5709016535, 20.1480426582,
+                                               7.3744700232]))
+              and np.allclose(cc[-2], cc[-1])
+              and not np.allclose(cc[0], np.diag([17.8882, 20.3046, 7.4355])))
+        try:
+            cp2k.opt_frame_cells(ci, 236, cell_file=cf); raised = False
+        except ValueError:
+            raised = True
+        check("opt_frame_cells RAISES when frames != .cell rows + 1", raised)
+        gi = os.path.join(d2, "geo-opt.inp")
+        try:
+            cp2k.opt_frame_cells(gi, 3); raised = False
+        except ValueError:
+            raised = True
+        check("opt_frame_cells RAISES on a foreign RESTART_CELL with no cell",
+              raised)
+        g = cp2k.opt_frame_cells(gi, 3, restart_cell=cc[-1])
+        check("opt_frame_cells uses the passed restart_cell for the f2 geo-opt",
+              len(g) == 3 and np.allclose(g[1], cc[-1]))
+    else:
+        print("  (MOR Cu_5 f2 chain missing — opt_frame_cells pins skipped)")
+    sc = os.path.join(ZROOT, "Foundations", "f3_binding", "pkg_FAU", "Ag_3",
+                      "NO3", "screen_sc", "screen.inp")
+    if os.path.exists(sc):
+        check("opt_frame_cells: a self-restart keeps the input cell",
+              np.allclose(cp2k.opt_frame_cells(sc, 2)[0],
+                          cp2k.read_input_cell(sc)["matrix"]))
+    # geometry.continuous_trajectory: an atom stepping across a face (stored
+    # WRAPPED, so it jumps a whole cell) comes out continuous; a 2-atom group
+    # stays whole; the last frame is in the home cell; per-frame cells honoured.
+    box = [np.diag([10.0, 10.0, 10.0]), np.diag([10.0, 10.0, 10.0]),
+           np.diag([11.0, 10.0, 10.0])]
+    P = [np.array([[9.8, 5, 5], [1.0, 1, 1], [9.9, 2, 2], [0.4, 2, 2]]),
+         np.array([[0.1, 5, 5], [1.0, 1, 1], [9.95, 2, 2], [0.45, 2, 2]]),
+         np.array([[0.3, 5, 5], [1.1, 1, 1], [0.05, 2, 2], [0.55, 2, 2]])]
+    T = geometry.continuous_trajectory(P, box, groups=[[2, 3]])
+    steps = max(np.abs(np.diff([t[0, 0] / c[0, 0] for t, c in zip(T, box)])))
+    check("continuous_trajectory: no jump across the face (frac step < 0.1)",
+          steps < 0.1)
+    check("continuous_trajectory: last frame free atoms inside the cell",
+          all(0 <= T[-1][i, 0] < 11.0 for i in (0, 1)))
+    check("continuous_trajectory: group kept whole in every frame",
+          all(abs(t[3, 0] - t[2, 0]) < 1.0 for t in T))
 
 
 EX_HOST = "user@cluster.example.edu"          # example identities: the real
@@ -1247,6 +1337,7 @@ def test_fileio():
         syms, pos = fileio.read_coords_inc(ci)
         check("coords.inc round-trip", syms == ["Si", "O"]
               and abs(pos[1][2] - 6.75) < 1e-12 and not fileio.has_crlf(ci))
+
 
         # --- multi-frame XYZ (Foundations communication/ compilation) ---
         traj = os.path.join(td, "geo-opt-pos-1.xyz")

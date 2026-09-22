@@ -177,6 +177,47 @@ def wrap_preserving_groups(positions, cell, groups=()):
     return pos
 
 
+def continuous_trajectory(positions, cells, groups=()):
+    """
+    Re-image a trajectory so every atom moves CONTINUOUSLY and the LAST frame
+    sits wrapped in its cell — for viewing optimisation trajectories, possibly
+    several jobs chained (cell-opt -> geo-opt, screen -> full-opt).
+
+    `positions`: list of (N,3) arrays; `cells`: one 3x3 per frame (they may
+    change, as in a cell-opt). Works in fractional coordinates: each frame is
+    shifted atom-by-atom by the integer lattice vector that brings it nearest
+    the PREVIOUS frame (valid while a step moves an atom less than half a cell,
+    true of optimiser steps; it also absorbs a whole-cell re-imaging at a job
+    boundary). Then ONE integer shift per atom — or per group in `groups`,
+    applied to the group as a unit, as in `wrap_preserving_groups` — puts the
+    final frame in the home cell, and that same shift is applied to every
+    frame. So the final frame matches the single-frame viewing copy and the
+    motion before it has no jumps across cell faces.
+
+    Returns a list of (N,3) arrays. Provenance: Foundations 2026-09-22,
+    trajectory export for the advisor report.
+    """
+    F = [np.asarray(p, float) @ np.linalg.inv(cell_matrix(c))
+         for p, c in zip(positions, cells)]
+    for k in range(1, len(F)):
+        F[k] = F[k] + np.round(F[k - 1] - F[k])
+    # make each group whole at the final frame (nearest image of its first
+    # atom); continuity above then carries that choice to every frame
+    for g in groups:
+        idx = [int(i) for i in g]
+        if idx:
+            d = np.round(F[-1][idx[0]] - F[-1][idx])
+            for k in range(len(F)):
+                F[k][idx] += d
+    last = F[-1]
+    shift = -np.floor(last)
+    for g in groups:
+        idx = [int(i) for i in g]
+        if idx:
+            shift[idx] = -np.floor(last[idx].mean(axis=0))
+    return [(f + shift) @ cell_matrix(c) for f, c in zip(F, cells)]
+
+
 def centroid_unwrapped(positions, cell, ref=0):
     """
     Centroid of a group of atoms, unwrapped relative to positions[ref].

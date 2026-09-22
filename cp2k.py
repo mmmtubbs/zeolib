@@ -686,6 +686,105 @@ def read_last_cell_vectors(cell_file):
     return [v[0:3], v[3:6], v[6:9]]
 
 
+def read_input_cell(inp_path):
+    """
+    The cell a CP2K INPUT declares: {'abc': [a, b, c] (Å), 'angles':
+    [alpha, beta, gamma] (deg), 'matrix': 3x3 rows = lattice vectors (Å)}.
+
+    Reads the first `&CELL` block's ABC and ALPHA_BETA_GAMMA (absent -> 90°,
+    CP2K's own default). The matrix is `ase.geometry.cellpar_to_cell`, which
+    is the orientation CP2K itself constructs from ABC + angles (verified for
+    the rhombohedral FAU cell against the FAU-era cell-opt.out, FOUNDATIONS.md
+    §2). Needed wherever the geometry of a FIXED-cell job (geo-opt, frozen
+    screen, full-opt, energy-force) is written out with its cell: those runs
+    print no `.cell` file, and the input's 4-decimal ABC is the cell that
+    actually ran — not the f2 relaxed cell it was rounded from.
+
+    No silent fallback (rule 7): an input with no ABC line RAISES, since a
+    guessed cell would put every atom in the wrong place.
+
+    Provenance: Foundations 2026-09-22, geometry export for the advisor pack
+    (`communication/export_geometries.py`).
+    """
+    txt = open(inp_path).read()
+    # The SUBSYS cell, not the first &CELL in the file: a CELL_OPT input also
+    # has a MOTION/PRINT `&CELL ... &END CELL` print key with no ABC in it.
+    sub = re.search(r"&SUBSYS\b(.*?)&END\s+SUBSYS", txt, re.S | re.I)
+    m = re.search(r"&CELL\b(.*?)&END\s+CELL", sub.group(1) if sub else txt,
+                  re.S | re.I)
+    if not m:
+        raise ValueError("%s: no &CELL block" % inp_path)
+    blk = m.group(1)
+    a = re.search(r"^\s*ABC\s+(?:\[\w+\]\s+)?(\S+)\s+(\S+)\s+(\S+)", blk,
+                  re.M | re.I)
+    if not a:
+        raise ValueError("%s: &CELL has no ABC line" % inp_path)
+    g = re.search(r"^\s*ALPHA_BETA_GAMMA\s+(?:\[\w+\]\s+)?(\S+)\s+(\S+)"
+                  r"\s+(\S+)", blk, re.M | re.I)
+    abc = [float(x) for x in a.groups()]
+    ang = [float(x) for x in g.groups()] if g else [90.0, 90.0, 90.0]
+    from ase.geometry.cell import cellpar_to_cell
+    M = cellpar_to_cell(abc + ang)
+    return {"abc": abc, "angles": ang, "matrix": [list(map(float, r)) for r in M]}
+
+
+def opt_frame_cells(inp_path, n_frames, cell_file=None, restart_cell=None):
+    """
+    The cell of EVERY frame of an optimisation's `<project>-pos-1.xyz`, as a
+    list of n_frames 3x3 matrices (rows = lattice vectors, Å).
+
+    * CELL_OPT (`cell_file` = its `<project>-1.cell`): frame k sits at .cell
+      row k, and the one extra LAST frame is CP2K's re-print of the final
+      geometry (identical positions to the frame before it — verified on all
+      33 Foundations f2 cell-opts), so it takes the last row's cell. The
+      trajectory does NOT contain the starting geometry: frame 1's energy is
+      the SECOND energy evaluation in the .out (MOR Cu_5 f2: the first,
+      -2105.3546 Ha, is the input structure; frame 1 is -2105.5643). So
+      n_frames must be rows + 1, and anything else RAISES — a restarted,
+      appended cell-opt would misalign silently otherwise.
+    * Fixed-cell jobs (GEO_OPT, screen, full-opt, mol-only): every frame is at
+      one cell. That is the input's ABC UNLESS the input restarts its cell
+      from ANOTHER job (`&EXT_RESTART` + `RESTART_CELL` naming a different
+      project's restart — the f2 geo-opt reads `cell-opt-1.restart`, whose
+      input ABC is still the cell-opt's STARTING cell). Then the caller must
+      pass `restart_cell` (e.g. `read_last_cell_vectors` of that cell-opt),
+      or this RAISES. A restart from the job's OWN `<project>-1.restart` (a
+      resumed fixed-cell run) keeps the input cell.
+
+    Provenance: Foundations 2026-09-22, trajectory export for the advisor
+    report — the f2 geo-opt's input ABC (17.8882 Å for MOR Cu_5) differs from
+    the cell it actually ran at (17.5709 Å), which is how this was found.
+    """
+    txt = open(inp_path).read()
+    base = read_input_cell(inp_path)["matrix"]
+    if cell_file is not None:
+        rows = []
+        for ln in open(cell_file):
+            if ln.lstrip().startswith("#") or not ln.split():
+                continue
+            v = [float(x) for x in ln.split()[2:11]]
+            rows.append([v[0:3], v[3:6], v[6:9]])
+        if n_frames != len(rows) + 1:
+            raise ValueError("%s: %d trajectory frames but %d .cell rows "
+                             "(expected rows + 1)" % (cell_file, n_frames,
+                                                      len(rows)))
+        return rows + [rows[-1]]
+    m = re.search(r"&EXT_RESTART(.*?)&END\s+EXT_RESTART", txt, re.S | re.I)
+    if m and re.search(r"^\s*RESTART_CELL(\s+(T|TRUE|\.TRUE\.))?\s*$",
+                       m.group(1), re.M | re.I):
+        f = re.search(r"RESTART_FILE_NAME\s+(\S+)", m.group(1), re.I)
+        proj = re.search(r"^\s*PROJECT(?:_NAME)?\s+(\S+)", txt, re.M | re.I)
+        own = (f and proj and os.path.basename(f.group(1))
+               == "%s-1.restart" % proj.group(1))
+        if not own:
+            if restart_cell is None:
+                raise ValueError("%s restarts its cell from %s — pass "
+                                 "restart_cell" % (inp_path,
+                                                   f.group(1) if f else "?"))
+            base = [list(map(float, r)) for r in restart_cell]
+    return [base] * n_frames
+
+
 # ── Job-directory hygiene (Foundations 2026-09-03) ─────────────────────────
 # A package generator that can be RE-RUN over a tree where some jobs have
 # already finished has exactly one dangerous failure mode: rewriting the
