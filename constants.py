@@ -40,6 +40,23 @@ GTH_POTENTIAL = {
 VALENCE_ELECTRONS = {el: int(pot.rsplit("q", 1)[1])
                      for el, pot in GTH_POTENTIAL.items()}
 
+# Spin multiplicity of each ISOLATED pseudo-atom's ground state (Hund's rules,
+# no spin-orbit: GTH pseudopotentials are scalar-relativistic), for atomic
+# reference energies — atomization / formation energies that remove each
+# element's pseudopotential energy zero from E(Z) and friends. Valence shells as
+# the GTH-qN potentials above define them:
+#   H 1s1 2S, C 2s2 2p2 3P, N 2s2 2p3 4S, O 2s2 2p4 3P, Na (2s2 2p6) 3s1 2S,
+#   Al 3s2 3p1 2P, Si 3s2 3p2 3P, Cl / I ns2 np5 2P, Cu 3d10 4s1 2S,
+#   Ag 4d10 5s1 2S, Pb 6s2 6p2 3P, Bi 6s2 6p3 4S.
+# Cu/Ag take the d10 s1 configuration (the experimental ground state, and the
+# one PBE also favours). Parity is selftest-pinned against VALENCE_ELECTRONS
+# (odd electron count <-> even multiplicity), so a wrong entry cannot pass.
+# [Foundations 2026-09-22, atom_references]
+ATOM_GROUND_MULTIPLICITY = {
+    "H": 2, "C": 3, "N": 4, "O": 3, "Na": 2, "Al": 2, "Si": 3, "Cl": 2,
+    "I": 2, "Cu": 2, "Ag": 2, "Pb": 3, "Bi": 4,
+}
+
 
 def valence_electron_count(symbols, charge=0):
     """

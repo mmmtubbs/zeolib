@@ -1673,6 +1673,13 @@ def test_bond_site():
 
 def test_constants_combos():
     print("[10] constants per-framework combo map")
+    am = constants.ATOM_GROUND_MULTIPLICITY
+    check("ATOM_GROUND_MULTIPLICITY covers every GTH element",
+          set(am) == set(constants.GTH_POTENTIAL))
+    check("ATOM_GROUND_MULTIPLICITY parity matches the GTH valence count",
+          all((constants.VALENCE_ELECTRONS[e] % 2 == 1) == (m % 2 == 0)
+              and m - 1 <= constants.VALENCE_ELECTRONS[e]
+              for e, m in am.items()))
     from zeolib.cation import Q_CAT
     check("MOR alias unchanged: 16 combos", len(constants.COMBO_NAMES) == 16
           and constants.combo_names("MOR") == constants.COMBO_NAMES)
