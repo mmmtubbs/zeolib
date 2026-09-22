@@ -1338,6 +1338,56 @@ def test_fileio():
         check("coords.inc round-trip", syms == ["Si", "O"]
               and abs(pos[1][2] - 6.75) < 1e-12 and not fileio.has_crlf(ci))
 
+        # --- input-view XYZ beside every coords file (2026-09-22) ---
+        vx = os.path.join(td, "coords.xyz")
+        v = fileio.read_xyz_frames(vx)
+        check("input-view: coords.inc -> 1-frame coords.xyz, same atoms, "
+              "no Lattice when no cell known",
+              len(v) == 1 and v[0]["symbols"] == ["Si", "O"]
+              and v[0]["positions"] == pos and "lattice" not in v[0]
+              and not fileio.has_crlf(vx))
+        fileio.write_coords_inc(ci, symbols=["Si"], positions=[(1, 2, 3)],
+                                cell=(17.8481, 20.6994, 7.5792))
+        check("input-view: (3,) cell -> orthorhombic Lattice",
+              fileio.read_xyz_frames(vx)[0]["lattice"]
+              == (17.8481, 0, 0, 0, 20.6994, 0, 0, 0, 7.5792))
+        rh = [[17.3330805, 0, 0], [8.6665403, 15.0108880, 0],
+              [8.6665403, 5.0036293, 14.1524010]]
+        cc = os.path.join(td, "coords_cellopt.inc")
+        fileio.write_coords_inc(cc, symbols=["Si"], positions=[(1, 2, 3)], cell=rh)
+        check("input-view: (3,3) rhombohedral cell kept; stem-named view "
+              "(coords_cellopt.inc -> coords_cellopt.xyz)",
+              np.allclose(fileio.read_xyz_frames(os.path.join(
+                  td, "coords_cellopt.xyz"))[0]["lattice"],
+                  np.ravel(rh), atol=1e-6))
+        from ase import Atoms
+        fileio.write_coords_inc(ci, atoms=Atoms("SiO", positions=[(0, 0, 0),
+                                (1, 1, 1)], cell=[10, 11, 12], pbc=True))
+        check("input-view: ASE Atoms carries its own cell into the view",
+              fileio.read_xyz_frames(vx)[0]["lattice"]
+              == (10, 0, 0, 0, 11, 0, 0, 0, 12))
+        nv = os.path.join(td, "nv", "coords.inc")
+        os.makedirs(os.path.dirname(nv))
+        fileio.write_coords_inc(nv, symbols=["Si"], positions=[(0, 0, 0)],
+                                view_xyz=False)
+        check("input-view: view_xyz=False writes the .inc only",
+              os.listdir(os.path.dirname(nv)) == ["coords.inc"])
+        check("input-view: coords.xyz survives cp2k.clear_generated",
+              cp2k.clear_generated(td) == 0 and os.path.exists(vx))
+        try:
+            fileio.write_coords_inc(ci, symbols=["Si"], positions=[(0, 0, 0)],
+                                    cell=(1.0, 2.0))
+            raised = False
+        except ValueError:
+            raised = True
+        check("input-view: malformed cell RAISES (rule 7)", raised)
+        try:
+            fileio.view_xyz_path(os.path.join(td, "coords.xyz"))
+            raised = False
+        except ValueError:
+            raised = True
+        check("input-view: a coords file named *.xyz RAISES (no self-overwrite)",
+              raised)
 
         # --- multi-frame XYZ (Foundations communication/ compilation) ---
         traj = os.path.join(td, "geo-opt-pos-1.xyz")

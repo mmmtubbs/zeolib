@@ -1,5 +1,6 @@
 """
-fileio.py — LF-safe file writing and coords.inc helpers.
+fileio.py — LF-safe file writing and coords.inc helpers (+ the input-view
+XYZ that `write_coords_inc` drops beside every coords file).
 
 EVERY file that ships to the cluster (.sh, .sbatch, .inp, .inc) MUST be written
 through write_lf: generating them on the Windows PC with default newlines
@@ -25,18 +26,67 @@ def has_crlf(path):
         return b"\r\n" in f.read()
 
 
-def write_coords_inc(path, atoms=None, symbols=None, positions=None):
+def write_coords_inc(path, atoms=None, symbols=None, positions=None,
+                     cell=None, view_xyz=True):
     """
     Write a CP2K &COORD include file (LF). Pass either an ASE Atoms object or
     (symbols, positions). Format matches every existing setup script:
     '%-2s  %14.8f  %14.8f  %14.8f'.
+
+    INPUT-VIEW PROTOCOL (2026-09-22): by default also writes a 1-frame
+    extended-XYZ of the same coordinates beside it (`coords.inc` ->
+    `coords.xyz`, see `view_xyz_path`) so any HPC job dir can be opened
+    straight in OVITO/ASE/VMD without reconstructing its geometry. The view
+    carries the cell as `Lattice=` when it is known: `cell=` if given
+    ((3,) box lengths or a (3,3) matrix, same forms as `geometry`), else the
+    Atoms object's own cell if it has one. With neither, the view is written
+    without a box — the atoms are still exact, only the box is not drawn.
+    It is a VIEW copy: CP2K reads the .inc, never this file. The name cannot
+    collide with CP2K products (`*-pos-1.xyz`, `*-frc-1.xyz`), so
+    `cp2k.clear_generated` keeps it, like the .inc it mirrors.
+    `view_xyz=False` suppresses it.
     """
     if atoms is not None:
         symbols = atoms.get_chemical_symbols()
         positions = atoms.get_positions()
+        if cell is None and atoms.cell.rank == 3:
+            cell = atoms.cell.array
     lines = ["%-2s  %14.8f  %14.8f  %14.8f\n" % (s, p[0], p[1], p[2])
              for s, p in zip(symbols, positions)]
     write_lf(path, "".join(lines))
+    if view_xyz:
+        write_extxyz(view_xyz_path(path),
+                     [{"symbols": list(symbols),
+                       "positions": [tuple(p) for p in positions],
+                       "comment": "input geometry, view copy of %s"
+                                  % os.path.basename(path)}],
+                     lattice=_lattice9(cell))
+
+
+def view_xyz_path(coords_path):
+    """Where `write_coords_inc` puts the input-view XYZ: the coords file's
+    stem + '.xyz' (`coords.inc` -> `coords.xyz`, `coords_cellopt.inc` ->
+    `coords_cellopt.xyz`). Raises if that would overwrite the coords file."""
+    out = os.path.splitext(coords_path)[0] + ".xyz"
+    if os.path.abspath(out) == os.path.abspath(coords_path):
+        raise ValueError("view XYZ would overwrite its own coords file: %s"
+                         % coords_path)
+    return out
+
+
+def _lattice9(cell):
+    """cell as (3,) box lengths or a (3,3) matrix -> 9 row-major numbers for
+    write_extxyz; None passes through. Anything else RAISES (rule 7)."""
+    if cell is None:
+        return None
+    rows = [list(r) if hasattr(r, "__len__") else r for r in cell]
+    if len(rows) == 3 and all(not isinstance(r, list) for r in rows):
+        a, b, c = (float(x) for x in rows)
+        return (a, 0.0, 0.0, 0.0, b, 0.0, 0.0, 0.0, c)
+    if len(rows) == 3 and all(isinstance(r, list) and len(r) == 3 for r in rows):
+        return tuple(float(x) for r in rows for x in r)
+    raise ValueError("cell must be (3,) box lengths or a (3,3) matrix, got %r"
+                     % (cell,))
 
 
 def write_csv_lf(path, rows, fieldnames=None):
