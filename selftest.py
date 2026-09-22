@@ -215,6 +215,14 @@ def test_geometry():
     p4[2] = p0[2] + [0.32, 0.0, 0.0]            # the measured s15/s9 offset
     check("same_structure TRUE at the measured c07066 s15/s9 offset (0.32 A)",
           geometry.same_structure(sy, p0, sy, p4, cellp) is True)
+    grp = geometry.group_same_structures(
+        [(sy, p0), (sy, p3), (sy, p1), (sy, p4), (sy, p2)], cellp)
+    check("group_same_structures: relabeling/MIC/0.32 A join the first; "
+          "3.68 A is its own group",
+          grp == [[0, 2, 3, 4], [1]], grp)
+    check("group_same_structures: input order decides each group's reference",
+          geometry.group_same_structures([(sy, p3), (sy, p0)], cellp)
+          == [[0], [1]])
     check("same_structure FALSE across a composition change",
           geometry.same_structure(sy, p0, ["Si", "O", "Na", "Na", "Al"], p0,
                                   cellp) is False

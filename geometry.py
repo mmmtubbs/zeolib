@@ -363,6 +363,37 @@ def same_structure(syms_a, pos_a, syms_b, pos_b, cell, tol=DEDUPE_TOL_ANG):
     return True
 
 
+def group_same_structures(structs, cell, tol=DEDUPE_TOL_ANG):
+    """
+    Partition structures into groups of "the same placement" under
+    `same_structure`: structs = sequence of (syms, pos) sharing one `cell`;
+    returns a list of groups, each a list of indices into `structs`.
+
+    GREEDY FIRST-FIT against each group's FIRST member, in input order — so
+    the result is deterministic, and whatever the caller puts first (e.g. the
+    incumbent structure) is the reference of its own group. `same_structure`
+    is not transitive (a~b and b~c at 0.6 A each does not make a~c), so a
+    group is "everything within tol of its first member", not a connected
+    component; order the input by the caller's priority.
+
+    Provenance: Foundations f2 re-seed (2026-09-22). FAU Bi_3's 35 guest-
+    relaxed hosts, compared on their 4 Bi only, fall into 14 cation
+    arrangements (6 hosts share the f2 E(Z) arrangement); each distinct
+    arrangement seeds one framework-only cell-opt -> geo-opt
+    (`Foundations/f2_reseed/`).
+    """
+    groups = []
+    for i, (sy, pos) in enumerate(structs):
+        for g in groups:
+            sy0, pos0 = structs[g[0]]
+            if same_structure(sy0, pos0, sy, pos, cell, tol=tol):
+                g.append(i)
+                break
+        else:
+            groups.append([i])
+    return groups
+
+
 def mean_pair_dist(positions, cell):
     """Mean MIC distance over all pairs; inf for <2 atoms."""
     pos = np.asarray(positions, float)
