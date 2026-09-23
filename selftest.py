@@ -1295,9 +1295,28 @@ def test_slurm():
           "fallback, both excluding)",
           "command -v rsync" in cb and "rsync -avz" in cb
           and 'ssh "$HOST" "tar czf - -C ' + "'$REMOTE'" in cb
-          and '| tar xzf - -C "$DEST"' in cb
+          and '| tar xf - $KEEP -C "$DEST"' in cb
           and cb.count("--exclude='*.wfn'") == 2)
-    cb_abs = slurm.copy_back_script_text("/pscratch/x/pkg", profile=slurm.PERLMUTTER,
+    # A copy_back once reverted a doc edited locally after ship.sh
+    # (dissociation_probe STATUS.md, 2026-09-23): both branches must keep a
+    # NEWER local file. The guard is only safe if an interrupted transfer
+    # never leaves a truncated file under its real name (it would be "newer"
+    # and protected forever): rsync partials live in a partial-dir, which is
+    # cleaned up after a successful run, and tar merges only a completed
+    # staging pull. Bare --partial and -k/--skip-old-files must stay out.
+    check("copy_back.sh: never overwrites a newer local file (rsync --update "
+          "+ partial-dir; tar staged + --keep-newer-files, pax mtimes)",
+          "rsync -avz --update --partial-dir=.rsync-partial " in cb
+          and "--partial " not in cb
+          and "-name .rsync-partial -prune -exec rm -rf {} +" in cb
+          and 'STAGE="$(mktemp -d)"' in cb
+          and 'tar xzf - -C "$STAGE"' in cb
+          and '| tar xzf - -C "$DEST"' not in cb
+          and 'KEEP="--keep-newer-files"' in cb
+          and 'tar xf - $KEEP -C "$DEST"' in cb
+          and cb.count("--format=pax") == 2
+          and "--skip-old-files" not in cb and "--keep-old-files" not in cb)
+    cb_abs =slurm.copy_back_script_text("/pscratch/x/pkg", profile=slurm.PERLMUTTER,
                                          extra_excludes=("*.cube",))
     check("copy_back.sh: absolute remote_dir + perlmutter host + extra exclude "
           "(both branches)",

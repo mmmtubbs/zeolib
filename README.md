@@ -87,6 +87,23 @@ from zeolib import cp2k, framework, geometry, slurm, fileio, constants
 
 ## Maintenance log
 
+- 2026-09-23 — generated `copy_back.sh` **never overwrites a newer local
+  file**. The rsync branch now uses `--update`; the tar branch uses
+  `--keep-newer-files` (GNU tar + bsdtar). Driven by the dissociation-probe
+  I2-wave pull, which reverted `pkg/STATUS.md` (edited locally an hour after
+  ship.sh) to the shipped copy. Two side changes make the guard safe. An
+  interrupted transfer would otherwise leave a truncated file stamped "now",
+  which the guard then protects forever (measured on openrsync:
+  `--partial --update` kept 172 MB of 3 GB and exited 0). So rsync partials
+  now go to `--partial-dir=.rsync-partial`, and those dirs are deleted after
+  a successful run because openrsync leaves them behind. The tar branch now
+  pulls into a `mktemp -d` staging dir and merges only a complete pull, with
+  pax (sub-second) mtimes on both streams. `-k`/`--skip-old-files` was
+  rejected because it would freeze mid-campaign `.out` files. The docstring
+  says why this cannot skip a real cluster output. End-to-end tested on
+  both branches with local ssh/rsync stand-ins (on the Mac, so bsdtar, not
+  Git Bash GNU tar). Existing package copy_back.sh files are NOT
+  retrofitted; living packages pick this up when regenerated. Selftest +1.
 - 2026-09-22 — `geometry.group_same_structures`: greedy first-fit
   partition of structures under `same_structure`. Driven by
   `Foundations/f2_reseed/`, which seeds one framework-only chain per DISTINCT
