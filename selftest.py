@@ -937,6 +937,36 @@ def test_cp2k_parsing():
         check("stress: unknown unit RAISES (no silent None)", False)
     except ValueError:
         check("stress: unknown unit RAISES (no silent None)", True)
+    # scf_iterations / scf_converged: a synthetic two-cycle log (the LAST
+    # cycle is returned; CP2K's own verdict is read), then the real
+    # atom_references pair — Bi hit MAX_SCF 3000 flat, Cu converged in 17.
+    td0 = tempfile.mkdtemp()
+    fp = os.path.join(td0, "scf.out")
+    with open(fp, "w") as fh:
+        fh.write("     1 OT CG       0.12E+00    7.1     0.12589562        -5.1731135396 -5.17E+00\n"
+                 "     2 OT LS       0.54E+00    9.2     0.09043581        -5.0623668493  1.11E-01\n"
+                 "  *** SCF run converged in     2 steps ***\n"
+                 "     1 OT CG       0.12E+00    7.1     0.00100000        -6.0000000000 -6.00E+00\n"
+                 "  *** SCF run NOT converged ***\n")
+    it = cp2k.scf_iterations(fp)
+    check("scf_iterations returns the LAST SCF cycle, last-three-field parse",
+          it == [(1, 0.001, -6.0)])
+    check("scf_converged reads the last verdict", cp2k.scf_converged(fp) is False)
+    ab = os.path.join(ZROOT, "Foundations", "atom_references", "pkg")
+    if os.path.exists(os.path.join(ab, "Bi", "atom.out")):
+        bi = cp2k.scf_iterations(os.path.join(ab, "Bi", "atom.out"))
+        check("real Bi atom: 3000 OT steps, unconverged, E flat to 3e-6 Ha "
+              "over the last 2,700",
+              len(bi) == 3000 and cp2k.scf_converged(
+                  os.path.join(ab, "Bi", "atom.out")) is False
+              and abs(bi[-1][2] - bi[299][2]) < 3e-6)
+        cu = os.path.join(ab, "Cu", "atom.out")
+        check("real Cu atom: converged, last SCF energy == final energy",
+              cp2k.scf_converged(cu) is True and abs(
+                  cp2k.scf_iterations(cu)[-1][2] - cp2k.final_energy_ha(cu))
+              < 1e-8)
+    else:
+        print("  (atom_references outputs missing — real SCF-trace pins skipped)")
     # read_input_cell: round-trip through the builder's own &CELL block
     # (ortho default + the FAU rhombohedral form), then a real FAU full-opt.
     td = tempfile.mkdtemp()

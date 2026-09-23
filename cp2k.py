@@ -482,6 +482,52 @@ def final_energy_ha(out_path):
     return es[-1] if es else None
 
 
+# "  N OT <method>  <step>  <time>  <convergence>  <total energy>  <change>":
+# anchored on the LAST three fields so a missing step-size column (first OT
+# step, other minimisers) cannot shift the reading.
+_OT_ROW = re.compile(r"^\s+(\d+)\s+OT\s+\S+.*\s([-\d.E+]+)\s+(-?\d+\.\d+)"
+                     r"\s+[-\d.E+]+\s*$")
+
+
+def scf_iterations(out_path):
+    """The LAST SCF cycle of an OT run as [(step, gradient, energy_ha), ...]
+    — the per-iteration table CP2K prints ("  N OT CG  step  grad  E  dE").
+    For judging an UNCONVERGED single point: whether the energy had stopped
+    moving while only the gradient criterion failed (a usable, flagged
+    value) or was still drifting (not usable). [] if no OT rows.
+
+    Provenance: Foundations 2026-09-22 atom_references — the isolated Bi atom
+    hit MAX_SCF 3000 with its energy flat to 2e-6 Ha over the last 2,700
+    iterations while the gradient bounced 3e-7..1e-5 around EPS_SCF 1e-7.
+    """
+    cycles, cur, last = [], [], None
+    for ln in open(out_path, errors="replace"):
+        m = _OT_ROW.match(ln)
+        if not m:
+            continue
+        step = int(m.group(1))
+        if last is not None and step <= last and cur:
+            cycles.append(cur)
+            cur = []
+        cur.append((step, float(m.group(2)), float(m.group(3))))
+        last = step
+    if cur:
+        cycles.append(cur)
+    return cycles[-1] if cycles else []
+
+
+def scf_converged(out_path):
+    """True / False from CP2K's own SCF verdict on the LAST SCF of the run,
+    None if it printed neither (killed mid-SCF)."""
+    verdict = None
+    for ln in open(out_path, errors="replace"):
+        if "SCF run NOT converged" in ln:
+            verdict = False
+        elif "SCF run converged in" in ln:
+            verdict = True
+    return verdict
+
+
 def final_energy_ev(out_path):
     e = final_energy_ha(out_path)
     return None if e is None else e * HARTREE_TO_EV
