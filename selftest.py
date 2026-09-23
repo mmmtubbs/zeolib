@@ -754,6 +754,23 @@ def test_cp2k_generation():
     check("dft_section: diagonalization replaces OT with DIAG+MIXING",
           "&DIAGONALIZATION T" in d_diag and "BROYDEN_MIXING" in d_diag
           and "&OT T" not in d_diag and "EPS_SCF" in d_diag)
+    # mulliken=True (2026-09-23, dissociation_probe/na_control): opt-in
+    # per-atom population print; default byte-identical, and the opt-in
+    # changes nothing but the one &PRINT block inside &DFT.
+    d_mul = cp2k.dft_section(mulliken=True)
+    blk = ("    &PRINT\n      &MULLIKEN ON\n      &END MULLIKEN\n"
+           "    &END PRINT\n")
+    check("dft_section: mulliken=False is byte-identical to the default",
+          cp2k.dft_section(mulliken=False) == d_def and "MULLIKEN" not in d_def)
+    check("dft_section: mulliken=True adds only the &PRINT block, inside &DFT",
+          d_mul.replace(blk, "") == d_def
+          and d_mul.index(blk) < d_mul.index("  &END DFT"))
+    g_mul = cp2k.geo_opt_input(cell, elements, restart_from=None, uks=True,
+                               mulliken=True)
+    check("geo_opt_input: mulliken=True reaches &DFT via **dft_kw",
+          g_mul.count("&MULLIKEN ON") == 1
+          and g_mul.replace(blk, "") == cp2k.geo_opt_input(
+              cell, elements, restart_from=None, uks=True))
     check("dft_section: solver knobs do not disturb EPS_SCF/CUTOFF",
           all(("EPS_SCF %s" % cp2k.EPS_SCF) in x and "CUTOFF 1500" in x
               for x in (d_def, d_diis, d_fsi, d_diag)))

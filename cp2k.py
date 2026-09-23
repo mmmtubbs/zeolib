@@ -44,7 +44,7 @@ def dft_section(basis_rel="../../../", charge=0, uks=False, multiplicity=None,
                 cutoff=CUTOFF_RY, rel_cutoff=REL_CUTOFF_RY, eps_scf=EPS_SCF,
                 aspc=True, wfn_restart=None, scf_outer=None,
                 ot_minimizer="CG", ot_preconditioner="FULL_ALL",
-                diagonalization=False, mixing_alpha=0.4):
+                diagonalization=False, mixing_alpha=0.4, mulliken=False):
     """
     The &DFT section (2-space base indent), production protocol defaults.
     basis_rel: relative prefix from the job dir to MOR/ (where BASIS,
@@ -79,6 +79,18 @@ def dft_section(basis_rel="../../../", charge=0, uks=False, multiplicity=None,
     is UNCHANGED, so converged energies remain protocol-comparable. Added
     2026-07-17 for the stage1a_v2 dft_run1 SCF rescue (11/110 jobs aborted
     "SCF run NOT converged" from the ATOMIC guess at 1500 Ry).
+
+    mulliken: False (default, byte-identical) or True -> a `&PRINT &MULLIKEN
+    ON` block inside &DFT, so the per-atom charge/spin is printed after every
+    converged SCF even at `PRINT_LEVEL LOW` (the GEO_OPT/CELL_OPT builders'
+    level, where CP2K otherwise prints none; `energy_force_input` runs at
+    MEDIUM and already prints it). `read_mulliken_spin` takes the LAST block,
+    i.e. the final geometry. Output-only: no effect on energies or forces.
+    Added 2026-09-23 for `Foundations/dissociation_probe/na_control`: the
+    I2 wave's 16 Cu probes all converged to broken-symmetry singlets
+    (|spin| ~2.2 e) but, run at LOW, recorded nowhere WHICH atoms carry the
+    spin -- the one observation that separates a Cu(II)-iodide product from
+    an iodine radical pair or spin smeared into the framework.
     """
     spin = ""
     if uks:
@@ -96,6 +108,8 @@ def dft_section(basis_rel="../../../", charge=0, uks=False, multiplicity=None,
         outer = ("      &OUTER_SCF\n        EPS_SCF %s\n        MAX_SCF %d\n"
                  "      &END OUTER_SCF\n" % (eps_scf, int(scf_outer[1])))
     qs_extra = "      WF_INTERPOLATION ASPC\n      EXTRAPOLATION_ORDER 1\n" if aspc else ""
+    pop = ("    &PRINT\n      &MULLIKEN ON\n      &END MULLIKEN\n"
+           "    &END PRINT\n") if mulliken else ""
     if diagonalization:
         solver = ("      &DIAGONALIZATION T\n        ALGORITHM STANDARD\n"
                   "      &END DIAGONALIZATION\n"
@@ -142,9 +156,9 @@ def dft_section(basis_rel="../../../", charge=0, uks=False, multiplicity=None,
         &END PAIR_POTENTIAL
       &END VDW_POTENTIAL
     &END XC
-  &END DFT
+%s  &END DFT
 """ % (spin, basis_rel, basis_rel, charge, wfn, cutoff, rel_cutoff, qs_extra,
-       eps_scf, guess, max_scf, solver, outer, basis_rel)
+       eps_scf, guess, max_scf, solver, outer, basis_rel, pop)
 
 
 def strip_wfn_restart(inp_text):
