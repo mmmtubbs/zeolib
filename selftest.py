@@ -1906,6 +1906,40 @@ def test_provenance():
           prov.is_dirty(outside) is None, prov.is_dirty(outside))
 
 
+def test_relax():
+    print("[relax] pressure-converged cell relaxation (ASE EMT Cu fixture)")
+    import numpy as np
+    from ase.build import bulk
+    from ase.calculators.emt import EMT
+    from ase.optimize import FIRE
+    from zeolib import relax as R
+
+    def mk():
+        at = bulk("Cu", "fcc", a=3.70, cubic=True).repeat((2, 2, 2))
+        at.rattle(0.05, seed=3)
+        at.calc = EMT()
+        return at
+    # the failure this module exists for: the filter's fmax criterion alone
+    loose = mk()
+    FIRE(R.cell_filter(loose), logfile=None).run(fmax=0.05, steps=1000)
+    check("filter fmax criterion alone leaves > 1 kbar (the MACE Si11 defect)",
+          R.max_stress_bar(loose) > 1000, "%.0f bar" % R.max_stress_bar(loose))
+    at = mk()
+    r = R.relax(at, "variable", pressure_tol_bar=10, maxstep=3000)
+    c = np.array(at.get_cell())
+    check("relax(variable, 10 bar): converged, every normal stress < 10 bar",
+          r["conv"] and r["max_stress_bar"] < 10 and r["fmax_atoms"] < 0.05, r)
+    check("relax(variable): angles held (KEEP_ANGLES parity)",
+          np.abs(c - np.diag(c.diagonal())).max() < 1e-9)
+    check("relax(fixed): cell untouched, converged",
+          R.relax(mk(), "fixed")["conv"])
+    try:
+        R.relax(mk(), "variable")
+        check("relax(variable) without pressure_tol_bar RAISES", False, "no error")
+    except ValueError:
+        check("relax(variable) without pressure_tol_bar RAISES", True)
+
+
 def main():
     print("zeolib selftest (root: %s)" % ZROOT)
     test_geometry()
@@ -1923,6 +1957,7 @@ def main():
     test_bond_site()
     test_constants_combos()
     test_provenance()
+    test_relax()
     print()
     if _FAILS:
         print("FAILED: %d check(s): %s" % (len(_FAILS), "; ".join(_FAILS)))
