@@ -1168,6 +1168,28 @@ def test_slurm():
     check("perlmutter submit script: no throttle loop, shifterimg note, timestamps",
           "shifterimg pull" in psub and "squeue" not in psub and "psub" not in psub
           and "perlmutter.sbatch" in psub and "date '+%F %T'" in psub)
+    # One-GPU MLIP sbatch (2026-09-24): billed renter header, conda env, and
+    # the fail-loud GPU gate — the preamble of the shipped Si11 ranking route.
+    g = slurm.gpu_sbatch_text("mvs", ["python -u run.py"], "mace-polar-gpu")
+    check("gpu sbatch: renter GPU header, env activated, fail-loud GPU gate, "
+          "run line last",
+          "#SBATCH --partition=%s\n" % slurm.GPU_PARTITION in g
+          and "#SBATCH --qos=renter\n" in g and "#SBATCH --gres=gpu:1\n" in g
+          and "conda activate mace-polar-gpu\n" in g
+          and "torch.cuda.is_available()" in g and "set -euo pipefail" in g
+          and "singularity" not in g and g.endswith("python -u run.py\n"))
+    for label, fn in (
+            ("gpu sbatch rejects perlmutter",
+             lambda: slurm.gpu_sbatch_text("x", [], "e",
+                                           profile=slurm.PERLMUTTER)),
+            ("gpu sbatch enforces the 14 d walltime cap",
+             lambda: slurm.gpu_sbatch_text("x", [], "e",
+                                           walltime="15-00:00:00"))):
+        try:
+            fn()
+            check(label, False, "no error raised")
+        except ValueError:
+            check(label, True)
     # Perlmutter job-array bundling (one sbatch + manifest, 2026-07-17)
     man = slurm.array_manifest_text(["Si15/a01_s1", "Si15/a01_s2"])
     check("array manifest: one dir per line (1-based order), trailing newline",

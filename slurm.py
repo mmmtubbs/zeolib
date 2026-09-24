@@ -44,6 +44,9 @@ CP2K_EXE = "cp2k.psmp"
 S1_PARTITION = "cpu-s1-vessel-0"; S1_ACCOUNT = "cpu-s1-vessel-0"   # free, 6 nodes
 S2_PARTITION = "cpu-s2-core-0";   S2_ACCOUNT = "cpu-s2-vessel-0"   # paid overflow
 MAX_CONCURRENT_JOBS = 50   # Pronghorn standard (feedback_cluster_job_throttle)
+# GPU (P100, driver 470 => CUDA-11 torch builds only). BILLED renter QOS; NOT
+# counted by the 50-job throttle (GPU is excluded from it, 2026-09-08).
+GPU_PARTITION = "gpu-s2-core-0";  GPU_ACCOUNT = "gpu-s2-vessel-0";  GPU_QOS = "renter"
 
 # ── Perlmutter constants ────────────────────────────────────────────────────
 PERLMUTTER_IMAGE = "docker:cp2k/cp2k:2022.1"   # NOT the 2026 protocol — see header
@@ -248,6 +251,70 @@ SIF=%s
        ("#SBATCH --exclude=%s\n" % exclude_nodes) if exclude_nodes else "",
        CP2K_SIF)
     return head + "\n".join(run_lines) + "\n"
+
+
+
+def gpu_sbatch_text(job_name, run_lines, env, walltime="1-00:00:00",
+                    cpus=8, mem="24G", output="%x_%j.out", profile=PRONGHORN):
+    """
+    A one-GPU Pronghorn sbatch for a python/MLIP job (not CP2K): the BILLED
+    renter-QOS header, conda activation of `env` (a maceenv registry `env`,
+    e.g. "mace-polar-gpu"), OMP/MKL threads = cpus, and a FAIL-LOUD GPU gate
+    (nvidia-smi + torch.cuda.is_available, since a CPU-only torch or a CUDA-12
+    build on the driver-470 P100s otherwise runs silently on CPU at ~100x the
+    cost). run_lines run after the gate, in $SLURM_SUBMIT_DIR, under
+    `set -euo pipefail`.
+
+    Provenance: extracted 2026-09-24 from the GPU preamble of
+    MOR/pipeline/stage1a_v2/s2_package.py (run_rank_gpu.sbatch, the Si11
+    ranking route that ran 36 shards) for MOR/tests/mace_volume_states_si11;
+    s2_package keeps its inline copy (it shipped). Pronghorn only — Perlmutter
+    GPU work has never been set up and raises rather than guessing.
+    """
+    if profile.name != "pronghorn":
+        raise ValueError("gpu_sbatch_text: Pronghorn only (got %s)" % profile.name)
+    _check_walltime(walltime, profile)
+    return """\
+#!/bin/bash -l
+#SBATCH --job-name=%s
+#SBATCH --partition=%s
+#SBATCH --account=%s
+#SBATCH --qos=%s
+#SBATCH --gres=gpu:1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=%d
+#SBATCH --mem=%s
+#SBATCH --time=%s
+#SBATCH --output=%s
+
+set -euo pipefail
+cd "$SLURM_SUBMIT_DIR"
+
+if [ -z "${CONDA_DIR:-}" ]; then
+  if command -v conda >/dev/null 2>&1; then CONDA_DIR="$(conda info --base 2>/dev/null)"; else
+    for d in "$HOME/miniconda3" "/data/gpfs/home/$USER/miniconda3" "$HOME/anaconda3"; do
+      [ -x "$d/bin/conda" ] && { CONDA_DIR="$d"; break; }; done
+  fi
+fi
+[ -x "${CONDA_DIR:-}/bin/conda" ] || { echo "FATAL: conda base not found"; exit 1; }
+source "$CONDA_DIR/etc/profile.d/conda.sh"
+conda activate %s
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-%d}"
+export MKL_NUM_THREADS="$OMP_NUM_THREADS"
+
+echo "host $(hostname) | env %s | $(date)"
+nvidia-smi || { echo "FATAL: no GPU on this node"; exit 1; }
+python - <<'PY'
+import sys, torch
+print("torch", torch.__version__, "| built for CUDA:", torch.version.cuda)
+if not torch.cuda.is_available():
+    sys.exit("FATAL: torch cannot see the GPU (need a cuda-11.x build for driver 470).")
+print("device:", torch.cuda.get_device_name(0))
+PY
+
+""" % (job_name, GPU_PARTITION, GPU_ACCOUNT, GPU_QOS, cpus, mem, walltime,
+       output, env, cpus, env) + "\n".join(run_lines) + "\n"
 
 
 def array_manifest_text(job_dirs):
