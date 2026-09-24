@@ -636,6 +636,69 @@ def opt_completed(out_path):
                for ln in open(out_path, errors="replace"))
 
 
+_OPT_NUM = re.compile(r"^\s*OPT\|\s+(.+?)\s+(-?\d[\d.Ee+-]*)\s*$")
+_OPT_FLAG = re.compile(r"^\s*OPT\|\s+(.+?) (?:is|are) converged\s+(YES|NO)\s*$")
+
+
+def opt_exit(out_path):
+    """
+    HOW an optimisation ended, and where its last step stood against the
+    geometry criteria — the question `opt_completed` does not ask.
+
+    Returns None if there is no output, else a dict:
+      exit       'criteria'  — standard banner: every geometry criterion met
+                 'lbfgs'     — L-BFGS's OWN stop (WANTED_PROJ_GRADIENT +
+                               WANTED_REL_F_ERROR), which fires when the energy
+                               stops changing, whatever the gradient/pressure
+                 None        — neither (still running, killed, or failed)
+      steps      last `OPT| Step number` (0 if no step block yet)
+      last       {label: float} from the LAST `OPT|` step block — e.g.
+                 'Total energy [hartree]', 'Maximum gradient',
+                 'Convergence limit for maximum gradient',
+                 'Pressure deviation [bar]', 'Pressure tolerance [bar]'
+      unmet      criteria reported NO in that last block (e.g.
+                 ['Maximum gradient', 'Pressure']); [] if all YES
+
+    `opt_completed` accepts both exits as converged, correctly — the L-BFGS
+    stop is CP2K's own verdict. But it can fire far from the geometry
+    criteria: Foundations f2_reseed FAU Bi_3 s12 (2026-09-24) stopped its
+    cell-opt at step 22 with max gradient 0.0080 (limit 0.00045) and 347 bar
+    (tolerance 100), energy flat to 2e-9 Ha between the last two steps. Report
+    `exit` + `unmet` next to any cell-opt energy so such runs are VISIBLE,
+    not silently equal to a criteria exit. The `OPT|` block format is the
+    CP2K 2026 image's; a `CELL_OPT|` header line never matches (anchored).
+    """
+    if not os.path.exists(out_path):
+        return None
+    exit_kind, steps, last, cur = None, 0, {}, None
+    for ln in open(out_path, errors="replace"):
+        if "OPTIMIZATION COMPLETED" in ln:
+            exit_kind = "criteria"
+        elif "run CONVERGED!" in ln and exit_kind is None:
+            exit_kind = "lbfgs"
+        m = _OPT_FLAG.match(ln)
+        if m and cur is not None:
+            cur["_flags"][m.group(1)] = (m.group(2) == "YES")
+            continue
+        m = _OPT_NUM.match(ln)
+        if not m:
+            continue
+        label, val = m.group(1), m.group(2)
+        if label == "Step number":
+            cur = {"_flags": {}}
+            last = cur
+            steps = int(val)
+            continue
+        if cur is not None:
+            try:
+                cur[label] = float(val)
+            except ValueError:
+                pass
+    flags = last.pop("_flags", {}) if last else {}
+    unmet = [k for k, ok in flags.items() if not ok]
+    return dict(exit=exit_kind, steps=steps, last=last, unmet=unmet)
+
+
 def read_forces_au(job_dir):
     """
     Forces (Ha/Bohr) from the ENERGY_FORCE print file (*forces*1_0.xyz /

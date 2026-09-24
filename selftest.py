@@ -835,6 +835,31 @@ def test_cp2k_parsing():
         check("opt_completed: %s -> %s" % (label, want),
               cp2k.opt_completed(p) is want)
         os.remove(p)
+    # opt_exit: WHICH banner ended an optimisation and where its last step
+    # stood — pinned on a real Foundations f2 cell-opt that took the L-BFGS
+    # exit (FAU Cu_3, 2026-09-24 survey).
+    co = os.path.join(ZROOT, "Foundations", "f2_exchange", "pkg_FAU", "Cu_3",
+                      "cell-opt.out")
+    if os.path.exists(co):
+        ox = cp2k.opt_exit(co)
+        check("opt_exit: FAU Cu_3 f2 cell-opt ended via L-BFGS's own stop",
+              ox["exit"] == "lbfgs", ox["exit"])
+        check("opt_exit: its last step block is step 41 (banner at 42)",
+              ox["steps"] == 41, ox["steps"])
+        check("opt_exit: last-block pressure tolerance read as 100 bar",
+              ox["last"].get("Pressure tolerance [bar]") == 100.0,
+              ox["last"].get("Pressure tolerance [bar]"))
+        check("opt_exit: pressure reported NOT met at the L-BFGS stop",
+              "Pressure" in ox["unmet"], ox["unmet"])
+    with _tf.NamedTemporaryFile("w", suffix=".out", delete=False) as f:
+        f.write(" CELL_OPT| Pressure tolerance [bar]:   100.0\n"
+                " *** GEOMETRY OPTIMIZATION COMPLETED ***\n")
+        p = f.name
+    ox = cp2k.opt_exit(p)
+    check("opt_exit: standard banner -> 'criteria'; CELL_OPT| header ignored",
+          ox["exit"] == "criteria" and ox["steps"] == 0 and ox["last"] == {},
+          ox)
+    os.remove(p)
     # run_time_seconds: the two independent sources must AGREE, and a
     # walltime-killed run must yield None rather than a partial duration
     # (walltime sizing reads these numbers as complete-run durations). [2026-08-24]
