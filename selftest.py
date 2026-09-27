@@ -1965,6 +1965,121 @@ def test_relax():
         check("relax(variable) without pressure_tol_bar RAISES", True)
 
 
+def test_jobtrack():
+    print("[17] jobtrack ledger (snapshot parse, threads, home check)")
+    from zeolib import jobtrack as J
+    check("parse_duration: 7-00:00:00 / 02:03:04 / 05:06 / UNLIMITED",
+          (J.parse_duration("7-00:00:00"), J.parse_duration("02:03:04"),
+           J.parse_duration("05:06"), J.parse_duration("UNLIMITED"))
+          == (604800, 7384, 306, None))
+    check("parse_time: epoch, ISO, Unknown",
+          J.parse_time("1790000000") == 1790000000
+          and J.parse_time("2026-09-27T10:00:00") is not None
+          and J.parse_time("Unknown") is None)
+    rs = J.remote_script(21)
+    check("remote_script: epoch times, WorkDir, #END, no CR, no %% left",
+          "SLURM_TIME_FORMAT=%s" in rs and "WorkDir" in rs and "#END" in rs
+          and "\r" not in rs and "%%" not in rs and "-21 days" in rs)
+    B = "/ex/base"
+    T0 = 1790000000
+    pkg = B + "/FoundationsCampaign/Foundations/w/pkg"
+    def row(jid, state, sub, st, en, el, wd, name="j"):
+        return "|".join([str(jid), str(jid), name, "cpu-s2-core-0", state,
+                         str(sub), str(st) if st else "Unknown",
+                         str(en) if en else "Unknown", el, "7-00:00:00",
+                         "cpu-1", "0:0", wd])
+    snap_txt = "\n".join([
+        "Loading cp2k module chatter", J.FORMAT_TAG, "#NOW %d" % (T0 + 20000),
+        "#HOST login1", "#DAYS 21", "#SACCT",
+        row(101, "COMPLETED", T0, T0 + 100, T0 + 3700, "01:00:00", pkg + "/a"),
+        row(102, "COMPLETED", T0, T0 + 100, T0 + 3700, "01:00:00", pkg + "/b"),
+        row(103, "FAILED", T0, T0 + 100, T0 + 200, "00:01:40", pkg + "/c"),
+        row(104, "COMPLETED", T0 + 5000, T0 + 5100, T0 + 8700, "01:00:00", pkg + "/c"),
+        row(105, "CANCELLED by 42", T0, T0 + 100, T0 + 3700, "01:00:00", pkg + "/d"),
+        row(201, "RUNNING", T0 + 9000, T0 + 9100, None, "01:00:00", B + "/MOR/tests/r/pkg/x"),
+        row(202, "PENDING", T0 + 9000, None, None, "00:00:00", B + "/MOR/tests/r/pkg/y"),
+        row(301, "COMPLETED", T0, T0 + 100, T0 + 200, "00:01:40", B + "/elsewhere/q"),
+        "#SQUEUE", "201|RUNNING|%d|None" % (T0 + 9100),
+        "202|PENDING|%d|Priority" % (T0 + 30000),
+        "#LOOPS", "7|500|%s/MOR/tests/r/pkg|bash submit_all.sh" % B, "#END"])
+    try:
+        J.parse_snapshot(snap_txt.replace("#END", ""))
+        check("truncated snapshot (no #END) is REFUSED", False, "accepted")
+    except ValueError:
+        check("truncated snapshot (no #END) is REFUSED", True)
+    snap = J.parse_snapshot(snap_txt)
+    check("parse_snapshot: 8 jobs, chatter ignored, 'CANCELLED by' -> CANCELLED",
+          len(snap["jobs"]) == 8 and snap["jobs"]["105"]["state"] == "CANCELLED")
+    check("parse_snapshot: squeue start estimate lands on the PENDING job",
+          snap["jobs"]["202"].get("est_start") == T0 + 30000 and len(snap["loops"]) == 1)
+    root = tempfile.mkdtemp()
+    pl = os.path.join(root, "Foundations", "w", "pkg")
+    for d in "abcd":
+        os.makedirs(os.path.join(pl, d))
+    fileio.write_lf(os.path.join(pl, "copy_back.sh"), "#\n")
+    fileio.write_lf(os.path.join(pl, "submit_all.sh"),
+                    "".join('cd "%s" && submit_one cp2k.sbatch\n' % d for d in "abcde"))
+    fileio.write_lf(os.path.join(pl, "submit_rescue.sh"),
+                    'cd "c" && submit_one cp2k.sbatch\ncd "d" && submit_one cp2k.sbatch\n')
+    for n, mt in (("submit_all.sh", T0 - 1000), ("submit_rescue.sh", T0 + 4000)):
+        os.utime(os.path.join(pl, n), (mt, mt))
+    fileio.write_lf(os.path.join(root, "Foundations", "w", "NOTES.md"),
+                    "old\nNext: `bash pkg/copy_back.sh` -> collect\n")
+    def put(d, name, mt):
+        p = os.path.join(pl, d, name)
+        fileio.write_lf(p, "x")
+        os.utime(p, (mt, mt))
+    put("a", "run.out", T0 + 3690)          # written at the job's end -> home
+    put("a", "run.inp", T0 + 99999)         # an input edited later is NOT evidence
+    put("b", "run.out", T0 + 1000)          # pulled mid-run -> partial
+    put("b", "run.inp", T0 + 99999)
+    put("c", "cp2k_103.out", T0 + 150)      # only the SUPERSEDED job's output
+    rl = os.path.join(root, "MOR", "tests", "r", "pkg")
+    os.makedirs(os.path.join(rl, "x"))
+    fileio.write_lf(os.path.join(rl, "copy_back.sh"), "#\n")
+    fileio.write_lf(os.path.join(rl, "submit_all.sh"),
+                    "".join('cd "%s" && submit_one cp2k.sbatch\n' % d for d in "xyz"))
+    os.utime(os.path.join(rl, "submit_all.sh"), (T0, T0))
+    prefixes = [[B + "/FoundationsCampaign/", ""], [B + "/", ""]]
+    check("to_local: FoundationsCampaign/ maps to the repo root",
+          J.to_local(pkg + "/a", prefixes, root) == os.path.join(pl, "a"))
+    led = J.merge({"jobs": {}}, snap)
+    th = {t["key"]: t for t in J.build_threads(led, prefixes, root, now=T0 + 20000)}
+    w, r = th.get("Foundations/w/pkg"), th.get("MOR/tests/r/pkg")
+    check("threads: jobs grouped by package (copy_back.sh ancestor) + unmapped",
+          w is not None and r is not None
+          and any(k.startswith("(unmapped)") for k in th), sorted(th))
+    check("latest job per dir wins (FAILED 103 superseded by 104)",
+          sorted(j["id"] for j in w["jobs"]) == ["101", "102", "104", "105"])
+    hs = {j["id"]: j["home_now"] for j in w["jobs"]}
+    check("home check: end-time output=home, mid-run pull=partial, "
+          "input edit ignored, superseded output ignored",
+          hs == {"101": "home", "102": "partial", "104": "missing",
+                 "105": "missing"}, hs)
+    check("thread w: CANCELLED -> ATTENTION; 1 of 5 never handed to Slurm; "
+          "rescue counts only jobs submitted AFTER it was written",
+          w["status"] == "ATTENTION" and w["unsubmitted"] ==
+          [("submit_all.sh", 1, 5), ("submit_rescue.sh", 1, 2)],
+          (w["status"], w["unsubmitted"]))
+    check("thread w: NOTES.md 'Next:' line is the resume instruction",
+          w["next"].startswith("`bash pkg/copy_back.sh`"), w["next"])
+    check("thread r: RUNNING; bound = start + walltime, loop matched by cwd",
+          r["status"] == "RUNNING" and r["eta_bound"] == T0 + 30000 + 604800
+          and len(r["loops"]) == 1, (r["status"], r["eta_bound"]))
+    led2 = J.merge(led, snap)
+    check("merge keeps a 'home' verdict for an unchanged job",
+          led2["jobs"]["101"].get("home") == "home")
+    acks = {"Foundations/w/pkg": {"upto": T0 + 20000, "note": "seen"}}
+    th2 = {t["key"]: t for t in J.build_threads(led2, prefixes, root,
+                                                 now=T0 + 20000, acks=acks)}
+    txt = J.render_text(list(th2.values()), led2, T0 + 20000)
+    check("ack hides a thread until new activity; text + html render",
+          th2["Foundations/w/pkg"]["acked"] and "Foundations/w/pkg" not in txt
+          and "MOR/tests/r/pkg" in txt
+          and "<title>Cluster Jobs</title>" in J.render_html(list(th2.values()), led2, T0 + 20000))
+    shutil.rmtree(root)
+
+
 def main():
     print("zeolib selftest (root: %s)" % ZROOT)
     test_geometry()
@@ -1983,6 +2098,7 @@ def main():
     test_constants_combos()
     test_provenance()
     test_relax()
+    test_jobtrack()
     print()
     if _FAILS:
         print("FAILED: %d check(s): %s" % (len(_FAILS), "; ".join(_FAILS)))
