@@ -201,6 +201,9 @@ def merge(ledger, snap, cluster="pronghorn"):
             rec["home"], rec["home_end"] = old["home"], old["home_end"]
         jobs[jid] = rec
     ledger["last_fetch"] = snap["now"]
+    if snap.get("days"):   # earliest instant any snapshot could see
+        cs = snap["now"] - snap["days"] * 86400
+        ledger["coverage_start"] = min(ledger.get("coverage_start", cs), cs)
     ledger["host"] = snap["host"]
     ledger["loops"] = snap["loops"]
     return ledger
@@ -313,6 +316,30 @@ def submit_dirs(pkg_dir):
 
 # ── threads ─────────────────────────────────────────────────────────────────
 
+ABORT_SECONDS = 600
+
+
+def _aborted(j):
+    """CANCELLED before doing real work (never started, or < 10 min)."""
+    return (j.get("state") == "CANCELLED"
+            and (j.get("start") is None or (j.get("elapsed") or 0) < ABORT_SECONDS))
+
+
+def _loop_targets(loop):
+    """Remote dirs a live submit loop is working through: its cwd plus every
+    path-like token of its command line (a combined loop like
+    `for p in f3_rebuild/pkg_A f3_rebuild/pkg_B; do bash $p/submit...` runs
+    from the parent dir and names its packages only in the command)."""
+    import posixpath
+    cwd = loop.get("cwd", "")
+    out = {cwd}
+    for tok in re.split(r"[\s;'\"]+", loop.get("cmd", "")):
+        if "/" in tok and not tok.startswith("-") and "$" not in tok.split("/")[0]:
+            full = posixpath.normpath(posixpath.join(cwd, tok))
+            out.add(posixpath.dirname(full) if tok.endswith(".sh") else full)
+    return out
+
+
 def build_threads(ledger, prefixes, root, now=None, acks=None, check_home=True):
     """Group the ledger's jobs into threads (packages) and classify each.
     Returns a list of thread dicts, most urgent first."""
@@ -322,8 +349,11 @@ def build_threads(ledger, prefixes, root, now=None, acks=None, check_home=True):
     for j in ledger.get("jobs", {}).values():
         wd = j.get("workdir") or "?"
         cur = latest.get(wd)
-        key = (j.get("submit") or 0, int(j["id"]))
-        if cur is None or key > ((cur.get("submit") or 0), int(cur["id"])):
+        # a quick-cancelled job is an aborted duplicate (the 2026-09-21 probe
+        # resubmit, cancelled at ~30 s): it never outranks a real job
+        key = (not _aborted(j), j.get("submit") or 0, int(j["id"]))
+        if cur is None or key > (not _aborted(cur), cur.get("submit") or 0,
+                                 int(cur["id"])):
             latest[wd] = j
     threads = {}
     pkg_cache = {}
@@ -399,7 +429,7 @@ def _classify(t, ledger, now, root):
             if j.get("limit"):
                 bound.append(j["start"] + j["limit"])
             if typ:
-                likely.append(max(now, j["start"] + typ))
+                likely.append(j["start"] + typ)
         elif s in ACTIVE:
             st = j.get("est_start")
             if st and j.get("limit"):
@@ -413,6 +443,8 @@ def _classify(t, ledger, now, root):
                                    and not j.get("est_start"))
     # waves still inside a submit loop (never handed to Slurm yet)
     t["unsubmitted"] = []
+    recent = t["last_activity"] >= now - 3 * 86400
+    t["unsubmitted_info"] = []
     if t["pkg"]:
         subs = {}
         for j in ledger.get("jobs", {}).values():   # ALL jobs, not just latest
@@ -422,10 +454,16 @@ def _classify(t, ledger, now, root):
         for script, (mt, dirs) in submit_dirs(t["pkg"]).items():
             rds = [t["remote"] + "/" + d.strip("/") for d in dirs]
             hit = sum(1 for r in rds if subs.get(r, 0) >= mt - 60)
-            if 0 < hit < len(rds):
-                t["unsubmitted"].append((script, len(rds) - hit, len(rds)))
+            if not 0 < hit < len(rds) or mt < ledger.get("coverage_start", 0):
+                continue          # wave not started, or older than sacct's view
+            # only a CURRENT wave can have a live-or-dead loop; on an old
+            # thread the gap is usually work done elsewhere or skipped by a
+            # DONE guard, so it is shown but does not raise ATTENTION
+            (t["unsubmitted"] if recent or c["running"] + c["pending"]
+             else t["unsubmitted_info"]).append((script, len(rds) - hit, len(rds)))
+    rp = t["remote"]
     t["loops"] = [l for l in ledger.get("loops", [])
-                  if l["cwd"] == t["remote"] or l["cwd"].startswith(t["remote"] + "/")]
+                  if any(x == rp or x.startswith(rp + "/") for x in _loop_targets(l))]
     t["next"] = next_step(t["pkg"], root) if t["pkg"] else ""
     active = c["running"] + c["pending"]
     waiting = sum(n for _, n, _ in t["unsubmitted"])
@@ -493,10 +531,16 @@ def thread_lines(t, now):
     for script, left, tot in t["unsubmitted"]:
         live = "loop alive" if t["loops"] else "NO submit loop seen"
         out.append("    %s: %d of %d not yet handed to Slurm (%s)" % (script, left, tot, live))
+    for script, left, tot in t.get("unsubmitted_info", []):
+        out.append("    (%s: %d of %d dirs never ran from here — elsewhere, or skipped)"
+                   % (script, left, tot))
     if t["status"] == "RUNNING":
         eta = []
-        if t["eta_likely"]:
+        if t["eta_likely"] and t["eta_likely"] >= now:
             eta.append("likely ~%s" % _t(t["eta_likely"]))
+        elif t["eta_likely"]:
+            eta.append("running past this thread's median job (%s)"
+                       % _span(t["typical_run"]))
         if t["eta_bound"]:
             eta.append("walltime bound %s" % _t(t["eta_bound"]))
         if t["pending_unestimated"]:
@@ -505,8 +549,10 @@ def thread_lines(t, now):
             out.append("    finish: " + "; ".join(eta))
     elif t["last_end"]:
         out.append("    drained %s (%s)" % (_ago(t["last_end"], now), _t(t["last_end"])))
-    if t["status"] in ("PULL", "HOME") and t["pkg"] and (c["missing"] or c["partial"]):
-        out.append("    pull: bash %s/copy_back.sh" % t["key"])
+    if t["pkg"] and (c["missing"] or c["partial"]):
+        out.append("    pull: bash %s/copy_back.sh   (%d finished job%s not home)" % (
+            t["key"], c["missing"] + c["partial"],
+            "" if c["missing"] + c["partial"] == 1 else "s"))
     if t["next"]:
         out.append("    next (NOTES.md): " + t["next"])
     if t["acked"]:
@@ -519,6 +565,9 @@ def render_text(threads, ledger, now, home_days=7):
     head = ["Cluster jobs — as of %s (%s)%s" % (
         _t(lf), _ago(lf, now), "  ⚠ STALE: re-run jobs.sh" if lf and now - lf > 12 * 3600 else "")]
     body = []
+    for l in ledger.get("loops", []):
+        body.append("submit loop alive on %s for %s: %s" % (
+            ledger.get("host", "?"), _span(int(l.get("etime") or 0)), l["cmd"][:200]))
     for status in ("ATTENTION", "PULL", "RUNNING", "HOME"):
         ts = [t for t in threads if t["status"] == status and not t["acked"]]
         if status == "HOME":

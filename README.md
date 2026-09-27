@@ -90,6 +90,7 @@ from zeolib import cp2k, framework, geometry, slurm, fileio, constants
 ## Maintenance log
 
 - 2026-09-27 — `jobtrack.py` (+ `Zeolites/jobtrack/jobs.sh`): the program-wide job ledger that replaces remembering which thread to pick up after squeue empties. Local-only (never ships); site paths live in `jobtrack/config.json`, not here. Selftest +16 (synthetic snapshot: truncation refusal, supersession, home/partial/missing on mtimes, rescue-script timing, ack).
+  Same day, after the first real run (2,872 jobs): a quick-CANCELLED duplicate (<10 min) no longer supersedes the real job in its dir (the 09-21 probe resubmit hid 12 converged HI jobs); "not handed to Slurm" ignores scripts older than sacct's coverage and only raises ATTENTION on threads active in the last 3 d (old f3_binding waves ran from migration/ packages); combined submit loops match packages named in their command line; live loops head the report. Selftest +3.
 - 2026-09-24 — `cp2k.opt_exit`: which banner ended an optimisation and where
   its last step stood against the geometry criteria. Found while checking a
   44-h Foundations f2_reseed job (FAU Bi_3 s12): its cell-opt stopped via

@@ -1996,6 +1996,7 @@ def test_jobtrack():
         row(103, "FAILED", T0, T0 + 100, T0 + 200, "00:01:40", pkg + "/c"),
         row(104, "COMPLETED", T0 + 5000, T0 + 5100, T0 + 8700, "01:00:00", pkg + "/c"),
         row(105, "CANCELLED by 42", T0, T0 + 100, T0 + 3700, "01:00:00", pkg + "/d"),
+        row(106, "CANCELLED", T0 + 9000, T0 + 9000, T0 + 9030, "00:00:30", pkg + "/a"),
         row(201, "RUNNING", T0 + 9000, T0 + 9100, None, "01:00:00", B + "/MOR/tests/r/pkg/x"),
         row(202, "PENDING", T0 + 9000, None, None, "00:00:00", B + "/MOR/tests/r/pkg/y"),
         row(301, "COMPLETED", T0, T0 + 100, T0 + 200, "00:01:40", B + "/elsewhere/q"),
@@ -2008,8 +2009,8 @@ def test_jobtrack():
     except ValueError:
         check("truncated snapshot (no #END) is REFUSED", True)
     snap = J.parse_snapshot(snap_txt)
-    check("parse_snapshot: 8 jobs, chatter ignored, 'CANCELLED by' -> CANCELLED",
-          len(snap["jobs"]) == 8 and snap["jobs"]["105"]["state"] == "CANCELLED")
+    check("parse_snapshot: 9 jobs, chatter ignored, 'CANCELLED by' -> CANCELLED",
+          len(snap["jobs"]) == 9 and snap["jobs"]["105"]["state"] == "CANCELLED")
     check("parse_snapshot: squeue start estimate lands on the PENDING job",
           snap["jobs"]["202"].get("est_start") == T0 + 30000 and len(snap["loops"]) == 1)
     root = tempfile.mkdtemp()
@@ -2049,7 +2050,8 @@ def test_jobtrack():
     check("threads: jobs grouped by package (copy_back.sh ancestor) + unmapped",
           w is not None and r is not None
           and any(k.startswith("(unmapped)") for k in th), sorted(th))
-    check("latest job per dir wins (FAILED 103 superseded by 104)",
+    check("latest job per dir wins (FAILED 103 superseded by 104); a 30-s "
+          "CANCELLED duplicate (106) does NOT supersede the real job 101",
           sorted(j["id"] for j in w["jobs"]) == ["101", "102", "104", "105"])
     hs = {j["id"]: j["home_now"] for j in w["jobs"]}
     check("home check: end-time output=home, mid-run pull=partial, "
@@ -2066,6 +2068,12 @@ def test_jobtrack():
     check("thread r: RUNNING; bound = start + walltime, loop matched by cwd",
           r["status"] == "RUNNING" and r["eta_bound"] == T0 + 30000 + 604800
           and len(r["loops"]) == 1, (r["status"], r["eta_bound"]))
+    lt = J._loop_targets({"cwd": B + "/F", "cmd": "bash -c bash e/pkg/submit_all.sh; "
+                          "for p in r/pkg_A r/pkg_B; do bash $p/submit_s.sh; done"})
+    check("_loop_targets: a combined loop names its packages in the command",
+          {B + "/F/e/pkg", B + "/F/r/pkg_A", B + "/F/r/pkg_B"} <= lt, sorted(lt))
+    check("merge records sacct coverage start (now - days)",
+          led["coverage_start"] == T0 + 20000 - 21 * 86400)
     led2 = J.merge(led, snap)
     check("merge keeps a 'home' verdict for an unchanged job",
           led2["jobs"]["101"].get("home") == "home")
