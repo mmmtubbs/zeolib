@@ -1967,6 +1967,8 @@ def test_relax():
 
 def test_jobtrack():
     print("[17] jobtrack ledger (snapshot parse, threads, home check)")
+    import html
+    import time
     from zeolib import jobtrack as J
     check("parse_duration: 7-00:00:00 / 02:03:04 / 05:06 / UNLIMITED",
           (J.parse_duration("7-00:00:00"), J.parse_duration("02:03:04"),
@@ -2068,10 +2070,72 @@ def test_jobtrack():
     check("thread r: RUNNING; bound = start + walltime, loop matched by cwd",
           r["status"] == "RUNNING" and r["eta_bound"] == T0 + 30000 + 604800
           and len(r["loops"]) == 1, (r["status"], r["eta_bound"]))
+    sp = J.shell_path(r"C:\Users\M\My Drive\Z\pkg\copy_back.sh") if os.name == "nt" else ""
+    pc = J.pull_command(w)
+    hw = J.render_html(list(th.values()), led, T0 + 20000)
+    check("html: thread w's pull is a full-path, quoted, copyable command "
+          "(Git Bash form on Windows); a thread with nothing to pull has none",
+          (os.name != "nt" or sp == '"/c/Users/M/My Drive/Z/pkg/copy_back.sh"')
+          and pc == "bash " + J.shell_path(os.path.join(pl, "copy_back.sh"))
+          and os.path.isabs(os.path.join(pl, "copy_back.sh"))
+          and ("<code>%s</code>" % html.escape(pc)) in hw and 'onclick="cp(this)"' in hw
+          and "pull: bash" not in hw and J.pull_command(r) == "",
+          (sp, pc))
     lt = J._loop_targets({"cwd": B + "/F", "cmd": "bash -c bash e/pkg/submit_all.sh; "
                           "for p in r/pkg_A r/pkg_B; do bash $p/submit_s.sh; done"})
     check("_loop_targets: a combined loop names its packages in the command",
           {B + "/F/e/pkg", B + "/F/r/pkg_A", B + "/F/r/pkg_B"} <= lt, sorted(lt))
+    # HOME, NOT PROCESSED vs processed (2026-09-29): a drained, fully-home thread
+    hp = os.path.join(root, "Foundations", "h", "pkg")
+    os.makedirs(os.path.join(hp, "a"))
+    fileio.write_lf(os.path.join(hp, "copy_back.sh"), "#\n")
+    e_end = T0 + 3700
+    for fp, mt in ((os.path.join(hp, "a", "run.out"), e_end),
+                   (os.path.join(root, "Foundations", "h", "old.csv"), T0 - 5000)):
+        fileio.write_lf(fp, "x")
+        os.utime(fp, (mt, mt))
+    sib = os.path.join(root, "Foundations", "h", "sib", "pkg")   # another thread
+    os.makedirs(sib)
+    fileio.write_lf(os.path.join(sib, "copy_back.sh"), "#\n")
+    fileio.write_lf(os.path.join(sib, "late.out"), "x")          # newer, not analysis
+    hn = os.path.join(root, "Foundations", "h", "NOTES.md")
+    fileio.write_lf(hn, "# h — does X hold?\n\nConclusion (%s): stale, from before.\n"
+                    % time.strftime("%Y-%m-%d", time.localtime(e_end - 3 * 86400)))
+    hled = J.merge({"jobs": {}}, J.parse_snapshot("\n".join([
+        J.FORMAT_TAG, "#NOW %d" % (T0 + 20000), "#HOST login1", "#DAYS 21", "#SACCT",
+        row(401, "COMPLETED", T0, T0 + 100, e_end, "01:00:00",
+            B + "/FoundationsCampaign/Foundations/h/pkg/a"), "#SQUEUE", "#LOOPS", "#END"])))
+    def hthread():
+        return {t["key"]: t for t in J.build_threads(hled, prefixes, root, now=T0 + 20000)
+                }["Foundations/h/pkg"]
+    h1 = hthread()
+    check("PROCESS: home, but only an OLDER-dated Conclusion, a pre-End csv, a "
+          "NOTES.md edit and a sibling package's output -> not processed; "
+          "why falls back to the NOTES.md title",
+          h1["status"] == "PROCESS" and h1["why"] == "h — does X hold?"
+          and h1["why_from_title"], (h1["status"], h1["why"]))
+    hh = J.render_html([h1], hled, T0 + 20000, tdir=os.path.join(root, "jobtrack"))
+    check("PROCESS card: copyable full-path `jobs.sh --ack` command",
+          ("--ack &quot;Foundations/h/pkg&quot;") in hh and "jobs.sh" in hh
+          and "done? " not in hh, hh[-800:])
+    fileio.write_lf(hn, "# h — does X hold?\n\n- **Why:** because Y.\n"
+                    "Conclusion (%s): X holds.\n"
+                    % time.strftime("%Y-%m-%d", time.localtime(e_end)))
+    h2 = hthread()
+    check("dated Conclusion on/after End -> HOME; Why: line (bullet/bold) wins "
+          "over the title; card shows both as prose",
+          h2["status"] == "HOME" and h2["why"] == "because Y." and not h2["why_from_title"]
+          and h2["conclusion"][1] == "X holds."
+          and '<p class="say"><b>conclusion (' in J.render_html([h2], hled, T0 + 20000),
+          (h2["status"], h2["why"], h2["conclusion"]))
+    fileio.write_lf(hn, "# h\n")
+    csv = os.path.join(root, "Foundations", "h", "harvest.csv")
+    fileio.write_lf(csv, "x")
+    os.utime(csv, (e_end + 60, e_end + 60))
+    h3 = hthread()
+    check("a work-dir analysis file written after End -> HOME, named as evidence",
+          h3["status"] == "HOME" and h3["processed_by"][0] == "Foundations/h/harvest.csv",
+          (h3["status"], h3["processed_by"]))
     check("merge records sacct coverage start (now - days)",
           led["coverage_start"] == T0 + 20000 - 21 * 86400)
     led2 = J.merge(led, snap)

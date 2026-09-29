@@ -24,6 +24,11 @@ Design decisions, each for a reason:
     job's own end (mtimes survive both rsync -a and tar). The Slurm log name
     (cp2k_<id>.out) is NOT used — targeted pulls (f5 ladder, 2026-09-17)
     bring energy-force.out without it, so the log name under-counts.
+  * A home thread is split (2026-09-29): HOME, NOT PROCESSED until its
+    NOTES.md carries a `Conclusion (YYYY-MM-DD):` dated on/after the last
+    job's End, or its work dir gains a non-.md file written after that End
+    (`processed_evidence` says why NOTES edits alone do not count). Cards
+    show the NOTES.md `Why:` line (else its title) and the Conclusion.
   * Only the LATEST job per WorkDir counts; resubmits supersede earlier jobs.
   * A snapshot without its `#END` marker is refused (a dropped connection
     must never read as "all jobs vanished").
@@ -267,26 +272,111 @@ def home_state(job, local_dir):
     return "home" if newest >= end - HOME_SLACK else "partial"
 
 
-def next_step(pkg_dir, root):
-    """The last 'Next:' line of the nearest NOTES.md (package dir or up to two
-    parents) — the thread's own resume instruction. '' when none."""
+def notes_path(pkg_dir, root):
+    """The thread's NOTES.md: nearest in the package dir or up to two parents
+    (never above root), else None."""
     d = pkg_dir
     for _ in range(3):
         p = os.path.join(d, "NOTES.md")
         if os.path.isfile(p):
-            try:
-                with open(p, encoding="utf-8", errors="replace") as fh:
-                    hits = [l.strip() for l in fh
-                            if re.search(r"\bNext:", l)]
-            except OSError:
-                hits = []
-            if hits:
-                return re.sub(r"^.*?\bNext:\s*", "", hits[-1])[:240]
-            return ""
+            return p
         if os.path.normpath(d) == os.path.normpath(root):
             break
         d = os.path.dirname(d)
-    return ""
+    return None
+
+
+def _notes_lines(pkg_dir, root):
+    p = notes_path(pkg_dir, root)
+    if not p:
+        return []
+    try:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
+
+def next_step(pkg_dir, root):
+    """The last 'Next:' line of the thread's NOTES.md — its own resume
+    instruction. '' when none."""
+    hits = [l.strip() for l in _notes_lines(pkg_dir, root) if re.search(r"\bNext:", l)]
+    return re.sub(r"^.*?\bNext:\s*", "", hits[-1])[:240] if hits else ""
+
+
+# One-sentence NOTES.md fields (2026-09-29, Marcus: home cards say why the
+# jobs ran; analysed cards say the most important conclusion). Line-anchored
+# (optional "- " / "**") so prose that merely contains "why:" never matches;
+# the LAST line wins, like Next:. The Conclusion carries its date because it
+# is also processed-evidence: a rerun package sharing its parent's NOTES.md
+# (mace_volume_states_si11/pkg_rerun) must not inherit an older conclusion.
+_WHY = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?Why:(?:\*\*)?\s*(\S.*)$")
+_CONC = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?Conclusion\s*\((\d{4}-\d{2}-\d{2})\):"
+                   r"(?:\*\*)?\s*(\S.*)$")
+
+
+def thread_why(pkg_dir, root):
+    """(sentence, from_title): the last `Why:` line of the thread's NOTES.md;
+    failing that its `# ` title (usually phrased as the question), flagged
+    from_title=True; ("", False) when there is no NOTES.md."""
+    lines = _notes_lines(pkg_dir, root)
+    hits = [m.group(1).strip() for m in map(_WHY.match, lines) if m]
+    if hits:
+        return hits[-1][:300], False
+    for l in lines:
+        if l.startswith("# "):
+            return l[2:].strip()[:300], True
+    return "", False
+
+
+def thread_conclusion(pkg_dir, root):
+    """(date 'YYYY-MM-DD', sentence) of the last `Conclusion (date):` line of
+    the thread's NOTES.md, else None."""
+    hits = [m for m in map(_CONC.match, _notes_lines(pkg_dir, root)) if m]
+    return (hits[-1].group(1), hits[-1].group(2).strip()[:400]) if hits else None
+
+
+def processed_evidence(pkg_dir, since, root):
+    """(what, when) showing a HOME thread's results were worked on after
+    `since` (its last job's End), else None -> "not processed yet".
+
+    Evidence (2026-09-29, Marcus: "pulled Home but haven't been analyzed"),
+    either of:
+      * a `Conclusion (YYYY-MM-DD):` line in its NOTES.md dated on/after the
+        End's date — the analysis written down;
+      * a file in its work dir (the package's parent, where harvest/collect
+        scripts write CSVs, tables, relaxed/ ...) modified at or after
+        `since`. Pulled outputs keep their cluster mtimes, so End is a fair
+        floor.
+    NOT evidence: NOTES.md or any other .md edit (adding the `Why:` line to an
+    unanalysed thread must not mark it analysed), the package itself, any
+    sibling subtree holding its own copy_back.sh (another thread's pulled
+    output — dissociation_probe/ contains na_control/pkg), __pycache__/.pyc
+    and dot-dirs. A false positive (an unrelated edit in the work dir) or a
+    false negative (analysis written elsewhere) is visible on the card:
+    processed threads name their evidence; `ack` clears the category."""
+    c = thread_conclusion(pkg_dir, root)
+    if c and c[0] >= time.strftime("%Y-%m-%d", time.localtime(since)):
+        return notes_path(pkg_dir, root), time.mktime(time.strptime(c[0], "%Y-%m-%d"))
+    work = os.path.dirname(os.path.normpath(pkg_dir))
+    if os.path.normpath(work) == os.path.normpath(root):
+        return None      # a package at the repo root has no work dir of its own
+    pkg = os.path.normpath(pkg_dir)
+    for dp, dn, fn in os.walk(work):
+        dn[:] = [x for x in dn if x != "__pycache__" and not x.startswith(".")
+                 and os.path.normpath(os.path.join(dp, x)) != pkg
+                 and not os.path.isfile(os.path.join(dp, x, "copy_back.sh"))]
+        for f in fn:
+            if f.endswith((".pyc", ".md")):
+                continue
+            p = os.path.join(dp, f)
+            try:
+                m = os.path.getmtime(p)
+            except OSError:
+                continue
+            if m >= since:
+                return p, m
+    return None
 
 
 def submit_dirs(pkg_dir):
@@ -386,7 +476,7 @@ def build_threads(ledger, prefixes, root, now=None, acks=None, check_home=True):
         t["acked"] = bool(a and a.get("upto", 0) >= t["last_activity"])
         t["ack_note"] = a.get("note", "") if a else ""
         out.append(t)
-    rank = {"ATTENTION": 0, "PULL": 1, "RUNNING": 2, "HOME": 3}
+    rank = {"ATTENTION": 0, "PULL": 1, "PROCESS": 2, "RUNNING": 3, "HOME": 4}
     out.sort(key=lambda t: (t["acked"], rank[t["status"]], -t["last_activity"]))
     return out
 
@@ -475,6 +565,17 @@ def _classify(t, ledger, now, root):
         t["status"] = "PULL"
     else:
         t["status"] = "HOME"
+    t["processed_by"] = None
+    if t["status"] == "HOME" and t["pkg"] and t["last_end"]:
+        t["processed_by"] = processed_evidence(t["pkg"], t["last_end"], root)
+        if t["processed_by"] is None:
+            t["status"] = "PROCESS"
+        else:
+            p, m = t["processed_by"]
+            t["processed_by"] = (os.path.relpath(p, root).replace(os.sep, "/"), m)
+    t["why"], t["why_from_title"] = (thread_why(t["pkg"], root) if t["pkg"]
+                                     else ("", False))
+    t["conclusion"] = thread_conclusion(t["pkg"], root) if t["pkg"] else None
 
 
 # ── rendering ───────────────────────────────────────────────────────────────
@@ -504,8 +605,50 @@ def _span(sec):
     return "%d min" % (sec // 60)
 
 
+def shell_path(path):
+    """Absolute local path as Git Bash takes it, double-quoted for a paste
+    (the Drive root has a space): C:\\a b\\c -> "/c/a b/c". POSIX paths pass
+    through, still quoted."""
+    p = os.path.abspath(path)
+    m = re.match(r"^([A-Za-z]):[\\/](.*)$", p)
+    if m:
+        p = "/%s/%s" % (m.group(1).lower(), m.group(2).replace("\\", "/"))
+    return shell_path_arg(p)
+
+
+def pull_command(t):
+    """Paste-ready full-path pull for a thread with finished jobs not home
+    (copy_back.sh runs from anywhere), else ""."""
+    c = t["counts"]
+    if not (t["pkg"] and (c["missing"] or c["partial"])):
+        return ""
+    return "bash " + shell_path(os.path.join(t["pkg"], "copy_back.sh"))
+
+
+def thread_commands(t, tdir):
+    """[(label, paste-ready full-path command)] for a thread's HTML card."""
+    out = []
+    pc = pull_command(t)
+    if pc:
+        n = t["counts"]["missing"] + t["counts"]["partial"]
+        out.append(("pull %d job%s" % (n, "" if n == 1 else "s"), pc))
+    if t["status"] == "PROCESS":
+        out.append(("done processing", "bash %s --ack %s" % (
+            shell_path(os.path.join(tdir, "jobs.sh")), shell_path_arg(t["key"]))))
+    return out
+
+
+def shell_path_arg(s):
+    """A plain argument double-quoted for bash (no path conversion): the four
+    characters special inside double quotes get a backslash."""
+    bs = chr(92)
+    return '"%s"' % "".join(bs + ch if ch in (bs, '"', "$", "`") else ch for ch in s)
+
+
+STATUSES = ("ATTENTION", "PULL", "PROCESS", "RUNNING", "HOME")
 LABEL = {"ATTENTION": "⚠ NEEDS A LOOK", "PULL": "⬇ READY TO PULL",
-         "RUNNING": "▶ RUNNING / QUEUED", "HOME": "✓ HOME"}
+         "PROCESS": "◆ HOME, NOT PROCESSED", "RUNNING": "▶ RUNNING / QUEUED",
+         "HOME": "✓ HOME"}
 
 
 def thread_lines(t, now):
@@ -553,6 +696,24 @@ def thread_lines(t, now):
         out.append("    pull: bash %s/copy_back.sh   (%d finished job%s not home)" % (
             t["key"], c["missing"] + c["partial"],
             "" if c["missing"] + c["partial"] == 1 else "s"))
+    if t["status"] in ("PROCESS", "HOME") and t["pkg"]:
+        if t["why"]:
+            out.append("    why: %s%s" % (t["why"], "   (NOTES.md title — no Why: line)"
+                                          if t["why_from_title"] else ""))
+        else:
+            out.append("    why: (no NOTES.md for this thread)")
+    if t["status"] == "PROCESS":
+        out.append("    not processed: no dated Conclusion in NOTES.md and no work-dir "
+                   "file written since the last job ended")
+        out.append('    done? bash jobtrack/jobs.sh --ack "%s"' % t["key"])
+    elif t.get("processed_by"):
+        cc = t["conclusion"]
+        if cc and t["processed_by"][0].endswith("NOTES.md"):
+            out.append("    processed: dated Conclusion line in %s" % t["processed_by"][0])
+        else:
+            out.append("    processed: %s (%s)" % (t["processed_by"][0], _t(t["processed_by"][1])))
+        out.append("    conclusion (%s): %s" % cc if cc else
+                   "    conclusion: (none recorded — add a `Conclusion (YYYY-MM-DD):` line to NOTES.md)")
     if t["next"]:
         out.append("    next (NOTES.md): " + t["next"])
     if t["acked"]:
@@ -568,7 +729,7 @@ def render_text(threads, ledger, now, home_days=7):
     for l in ledger.get("loops", []):
         body.append("submit loop alive on %s for %s: %s" % (
             ledger.get("host", "?"), _span(int(l.get("etime") or 0)), l["cmd"][:200]))
-    for status in ("ATTENTION", "PULL", "RUNNING", "HOME"):
+    for status in STATUSES:
         ts = [t for t in threads if t["status"] == status and not t["acked"]]
         if status == "HOME":
             ts = [t for t in ts if t["last_activity"] >= now - home_days * 86400]
@@ -587,13 +748,13 @@ def render_text(threads, ledger, now, home_days=7):
     return "\n".join(head + body) + "\n"
 
 
-def render_html(threads, ledger, now, home_days=7):
+def render_html(threads, ledger, now, home_days=7, tdir="jobtrack"):
     lf = ledger.get("last_fetch")
     stale = lf and now - lf > 12 * 3600
     esc = html.escape
     sec = []
     tally = {}
-    for status in ("ATTENTION", "PULL", "RUNNING", "HOME"):
+    for status in STATUSES:
         ts = [t for t in threads if t["status"] == status and not t["acked"]]
         if status == "HOME":
             ts = [t for t in ts if t["last_activity"] >= now - home_days * 86400]
@@ -603,19 +764,28 @@ def render_html(threads, ledger, now, home_days=7):
         cards = []
         for t in ts:
             ls = thread_lines(t, now)
-            cards.append('<div class="card %s"><div class="k">%s</div><pre>%s</pre></div>'
-                         % (status.lower(), esc(ls[0]), esc("\n".join(l[4:] for l in ls[1:]))))
+            prose = ("    why: ", "    conclusion")
+            body = [l[4:] for l in ls[1:]
+                    if not l.startswith(("    pull: ", "    done? ") + prose)]
+            say = "".join('<p class="say"><b>%s</b> %s</p>' % (esc(h + ":"), esc(v.strip()))
+                          for h, _, v in (l[4:].partition(": ") for l in ls[1:]
+                                          if l.startswith(prose)))
+            pull = "".join('<div class="cmd"><span class="lbl">%s:</span><code>%s</code>'
+                           '<button type="button" onclick="cp(this)">Copy</button></div>'
+                           % (esc(lb), esc(cmd)) for lb, cmd in thread_commands(t, tdir))
+            cards.append('<div class="card %s"><div class="k">%s</div>%s<pre>%s</pre>%s</div>'
+                         % (status.lower(), esc(ls[0]), say, esc("\n".join(body)), pull))
         sec.append('<h2 class="%s">%s <span>%d</span></h2>%s'
                    % (status.lower(), esc(LABEL[status]), len(ts), "".join(cards)))
     chips = "".join('<div class="chip %s"><b>%d</b>%s</div>' % (s.lower(), tally.get(s, 0), esc(LABEL[s]))
-                    for s in ("ATTENTION", "PULL", "RUNNING", "HOME"))
+                    for s in STATUSES)
     return """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cluster Jobs</title><style>
 :root{--bg:#f7f7f5;--fg:#1d1d1b;--mut:#6b6b66;--card:#fff;--line:#e2e1dc;
---att:#b3261e;--pull:#9a5b00;--run:#1f5fa8;--home:#2e7d32}
+--att:#b3261e;--pull:#9a5b00;--proc:#6a3fa0;--run:#1f5fa8;--home:#2e7d32}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe6;--mut:#9a9993;
---card:#20201e;--line:#34332f;--att:#f2877f;--pull:#e7b566;--run:#8ab8f0;--home:#8fcf93}}
+--card:#20201e;--line:#34332f;--att:#f2877f;--pull:#e7b566;--proc:#c3a2ec;--run:#8ab8f0;--home:#8fcf93}}
 body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;margin:0;padding:24px 16px}
 main{max-width:980px;margin:0 auto}h1{font-size:20px;margin:0 0 4px}
 .asof{color:var(--mut);margin-bottom:16px}.stale{color:var(--att);font-weight:600}
@@ -629,15 +799,30 @@ border-radius:6px;padding:10px 12px;margin:8px 0}
 .card pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font:13px/1.45 ui-monospace,Consolas,monospace;color:var(--fg)}
 .attention{border-left-color:var(--att)}h2.attention,.chip.attention b{color:var(--att)}
 .pull{border-left-color:var(--pull)}h2.pull,.chip.pull b{color:var(--pull)}
+.process{border-left-color:var(--proc)}h2.process,.chip.process b{color:var(--proc)}
 .running{border-left-color:var(--run)}h2.running,.chip.running b{color:var(--run)}
 .home{border-left-color:var(--home)}h2.home,.chip.home b{color:var(--home)}
 footer{color:var(--mut);font-size:13px;margin-top:28px}
+.say{margin:6px 0 0;font-size:14px}.say b{color:var(--mut);font-weight:600}
+.cmd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.cmd .lbl{color:var(--mut);font-size:13px}
+.cmd code{flex:1 1 320px;min-width:0;background:var(--bg);border:1px solid var(--line);border-radius:4px;
+padding:4px 8px;font:13px/1.4 ui-monospace,Consolas,monospace;word-break:break-all;user-select:all}
+.cmd button{font:inherit;font-size:13px;padding:3px 10px;border:1px solid var(--line);border-radius:4px;
+background:var(--card);color:var(--fg);cursor:pointer}.cmd button:hover{border-color:var(--mut)}
 </style></head><body><main>
 <h1>Cluster jobs</h1><div class="asof">Snapshot %s (%s) from %s%s</div>
 <div class="chips">%s</div>%s
 <footer>Generated by zeolib.jobtrack %s. Refresh: <code>bash jobtrack/jobs.sh</code> (one ssh) ·
 after a copy_back: <code>bash jobtrack/jobs.sh --offline</code> (no ssh).</footer>
-</main></body></html>
+</main><script>
+function cp(b){var c=b.previousElementSibling,t=c.textContent;
+function ok(){b.textContent="Copied";setTimeout(function(){b.textContent="Copy"},1500)}
+function fb(){var r=document.createRange();r.selectNodeContents(c);var s=getSelection();
+s.removeAllRanges();s.addRange(r);try{document.execCommand("copy")?ok():b.textContent="Ctrl+C"}
+catch(e){b.textContent="Ctrl+C"}}
+if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(ok,fb)}else{fb()}}
+</script></body></html>
 """ % (esc(_t(lf)), esc(_ago(lf, now)), esc(ledger.get("host", "?")),
        ' <span class="stale">— STALE, re-run jobs.sh</span>' if stale else "",
        chips, "".join(sec) or "<p>No jobs in the ledger yet.</p>", esc(_t(now)))
@@ -670,7 +855,7 @@ def report(tdir, root, show_all=False, quiet=False):
     with open(os.path.join(tdir, "STATUS.md"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write("```\n" + text + "```\n")
     with open(os.path.join(tdir, "jobs.html"), "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(render_html(threads, ledger, now, cfg.get("home_days", 7)))
+        fh.write(render_html(threads, ledger, now, cfg.get("home_days", 7), tdir))
     if not quiet:
         sys.stdout.write(text)
     return threads
@@ -719,6 +904,7 @@ def main(argv=None):
         acks[args.thread] = {"upto": time.time(), "note": args.note}
         save_json(ap_, acks)
         print("acknowledged %s — hidden until it gets new jobs" % args.thread)
+        report(args.dir, args.root, quiet=True)   # jobs.html/STATUS.md drop it now
     else:
         ap.print_help()
 
