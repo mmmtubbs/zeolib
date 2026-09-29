@@ -513,6 +513,49 @@ def sample_al_arrangements(fw, n_al, n_want, perms=None, rng=None,
     return out
 
 
+def neighbours_1swap(fw, sites, perms, exclude=None):
+    """
+    The symmetry-distinct, Löwenstein-valid 1-SWAP neighbourhood of an Al
+    arrangement: every arrangement reachable by moving exactly ONE Al to any
+    T site not already Al. Returns {canonical_sites_tuple: degeneracy}.
+
+    The arrangement's own class is never returned (a move onto a symmetry-
+    equivalent position lands back in it). `exclude` = canonical tuples to
+    drop (e.g. everything already ranked) — the Stage-1a neighbors phase
+    dedup rule (Marcus 2026-09-29: symmetry-unique AND not already seen).
+    Equivariant: any symmetry image of `sites` returns the same dict.
+
+    Provenance: the Stage-1a scale-up review (MOR/STAGE1A_SCALEUP_REVIEW.md
+    §1.3, §6) computed these neighbourhoods in a throwaway and named this
+    function as the gap. Exact MOR numbers (2026-09-29, selftest-pinned): Si15
+    mean 92.2 over all 844 classes (77,822 directed edges; the review's "~80"
+    was approximate), Si11 ~125 on a 200-class sample; the review measured
+    144/137/126 on random Si7/Si5/Si4.33 arrangements. First consumers: the
+    Si11 offline search simulator (stage1a_v2/simulate_search.py) and the
+    neighbors phase.
+    """
+    base = tuple(sorted(int(x) for x in sites))
+    own = canonical_arrangement(base, perms)[0]
+    skip = set(exclude or ())
+    loew = fw["loew"]
+    base_set = set(base)
+    out = {}
+    for a in base:
+        kept = [s for s in base if s != a]
+        blocked = set(kept)
+        for s in kept:
+            blocked.update(loew[s])
+        for t in fw["si_idx"]:
+            t = int(t)
+            if t in blocked or t in base_set:
+                continue
+            canon, g = canonical_arrangement(kept + [t], perms)
+            if canon == own or canon in skip or canon in out:
+                continue
+            out[canon] = g
+    return out
+
+
 def _weighted_independence_polynomial(adj, verts, weight=None):
     """
     Independence polynomial of the graph (adj, verts): coefficient k = number

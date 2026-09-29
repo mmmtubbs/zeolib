@@ -425,6 +425,31 @@ def test_enumeration():
           len(samp) == 25 and len(set(keys)) == 25 and three[0][0] not in keys
           and all(fwm.canonical_arrangement(s, perms) == (s, g) for s, g in samp))
 
+    # 1-swap neighbourhoods (2026-09-29, Stage-1a neighbors phase + search sim)
+    a = three[0][0]
+    na = fwm.neighbours_1swap(fw, a, perms)
+    brute = {b for b, _ in three if b != a
+             and any(len(set(a) & {p[i] for i in b}) == 2 for p in perms)}
+    check("neighbours_1swap == brute force over all Si15 classes (%d)" % len(brute),
+          set(na) == brute and len(na) == 54)
+    check("neighbours_1swap: canonical reps with their exact g, self excluded",
+          all(fwm.canonical_arrangement(b, perms) == (b, g) for b, g in na.items())
+          and a not in na)
+    img = tuple(sorted(perms[5][i] for i in a))
+    check("neighbours_1swap equivariant (symmetry image -> same neighbourhood)",
+          img != a and fwm.neighbours_1swap(fw, img, perms) == na)
+    sub = [s for s, _ in three[::40]]
+    check("neighbours_1swap relation symmetric (b in N(a) => a in N(b))",
+          all(s in fwm.neighbours_1swap(fw, b, perms)
+              for s in sub for b in fwm.neighbours_1swap(fw, s, perms)))
+    drop = set(list(na)[:10])
+    nx = fwm.neighbours_1swap(fw, a, perms, exclude=drop)
+    check("neighbours_1swap exclude honored",
+          set(nx) == set(na) - drop)
+    tot = sum(len(fwm.neighbours_1swap(fw, s, perms)) for s, _ in three)
+    check("Si15 1-swap graph: 77,822 directed edges (mean 92.2 per class)",
+          tot == 77822)
+
 
 def test_cation():
     print("[2c] cation model (energy parity vs archived v1 mor_core.py)")
