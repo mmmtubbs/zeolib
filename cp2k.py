@@ -496,6 +496,25 @@ def final_energy_ha(out_path):
     return es[-1] if es else None
 
 
+def final_dispersion_ha(out_path):
+    """Last '  Dispersion energy:' (Ha) — the D3 part of the final energy
+    (CP2K prints it once per energy evaluation, so the last one belongs to the
+    same frame as `final_energy_ha`), or None if the run printed none (no
+    pair potential, or a killed job).
+
+    Provenance: Foundations 2026-09-29 dissociation_probe/na_control — the
+    Na-form iodine radical pair sat 100-150 kJ/mol below prediction, and
+    splitting each E_bind into D3 vs electronic parts (about -85 D3 in both
+    frameworks; the FAU/MOR difference entirely electronic) was the readout
+    that located the gap.
+    """
+    v = None
+    for ln in open(out_path, errors="replace"):
+        if ln.startswith("  Dispersion energy:"):
+            v = float(ln.split()[-1])
+    return v
+
+
 # "  N OT <method>  <step>  <time>  <convergence>  <total energy>  <change>":
 # anchored on the LAST three fields so a missing step-size column (first OT
 # step, other minimisers) cannot shift the reading.

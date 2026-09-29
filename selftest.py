@@ -886,7 +886,16 @@ def test_cp2k_parsing():
     e = cp2k.final_energy_ha(out)
     check("final_energy_ha plausible (-2000..-1500 Ha)",
           e is not None and -2000 < e < -1500, e)
-    syms, pos = fileio.read_coords_inc(os.path.join(d, "coords.inc"))
+    ed = cp2k.final_dispersion_ha(out)
+    check("final_dispersion_ha = the D3 line of this PBE-D3 SP (-0.358740 Ha)",
+          ed is not None and abs(ed + 0.35873959721336) < 1e-12, ed)
+    with _tf.NamedTemporaryFile("w", suffix=".out", delete=False) as f:
+        f.write(" *** SCF run converged in     2 steps ***\n")
+        p4 = f.name
+    check("final_dispersion_ha -> None when no dispersion line (killed job)",
+          cp2k.final_dispersion_ha(p4) is None)
+    os.remove(p4)
+    syms, pos =fileio.read_coords_inc(os.path.join(d, "coords.inc"))
     frc = cp2k.read_forces_au(d)
     check("forces frame parsed, one row per atom (%d)" % len(syms),
           frc is not None and len(frc) == len(syms))
