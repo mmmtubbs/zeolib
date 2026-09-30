@@ -2119,6 +2119,73 @@ def test_jobtrack():
                           "for p in r/pkg_A r/pkg_B; do bash $p/submit_s.sh; done"})
     check("_loop_targets: a combined loop names its packages in the command",
           {B + "/F/e/pkg", B + "/F/r/pkg_A", B + "/F/r/pkg_B"} <= lt, sorted(lt))
+    # every-login-node loops + throttle-held waves (2026-09-30: three loops
+    # were running, two on the node the snapshot did not land on, all with 0
+    # jobs in Slurm because the probe loop held the 50 slots)
+    lt2 = J._loop_targets({"cwd": B + "/F", "cmd": "bash -c cd f3/pkg_X && bash "
+                           "submit_all_fullopt.sh; cd ../pkg_Y && bash submit_all_fullopt.sh"})
+    lt3 = J._loop_targets({"cwd": B + "/F", "cmd": "bash -c for p in A B.1; do "
+                           "(cd f3/pkg_$p && bash submit_all_screen.sh); done"})
+    check("_loop_targets: `cd ../pkg_Y` resolves against the earlier cd; a "
+          "`for p in ...` list expands `pkg_$p`",
+          {B + "/F/f3/pkg_X", B + "/F/f3/pkg_Y"} <= lt2
+          and {B + "/F/f3/pkg_A", B + "/F/f3/pkg_B.1"} <= lt3, (sorted(lt2), sorted(lt3)))
+    FB = B + "/FoundationsCampaign/Foundations"
+    l2 = J.parse_snapshot("\n".join([
+        J.FORMAT_TAG, "#NOW %d" % (T0 + 20000), "#HOST login-1", "#DAYS 21",
+        "#SACCT", "#SQUEUE", "#LOOPS2", "#LOOPHOST login-1 local",
+        "L|login-1|59565|1|80000|%s/MOR/tests/r/pkg|bash submit_all.sh" % B,
+        "Loading default-environment", "#LOOPHOST login-0 ok",
+        "L|login-0|36234|1|900|%s|bash -c (cd q/pkg_rerun && bash submit_all.sh); "
+        "for p in A B; do (cd f3/pkg_$p && bash submit_all_screen.sh; "
+        "bash submit_all_molonly.sh); done" % FB,
+        "L|login-0|36241|36234|800|%s/q/pkg_rerun|bash submit_all.sh" % FB,
+        "#LOOPHOST login-2 UNREACHABLE", "#END"]))
+    check("parse_snapshot #LOOPS2: host/ppid per loop, chatter dropped, "
+          "per-node check status kept",
+          len(l2["loops"]) == 3 and l2["loops"][1]["host"] == "login-0"
+          and l2["loops"][2]["ppid"] == "36234"
+          and l2["loop_hosts"] == {"login-1": "local", "login-0": "ok",
+                                   "login-2": "UNREACHABLE"}, l2["loop_hosts"])
+    pa = os.path.join(root, "Foundations", "f3", "pkg_A")
+    pr = os.path.join(root, "Foundations", "q", "pkg_rerun")
+    for d, scripts in ((pa, {"submit_all_screen.sh": "xyz", "submit_all_molonly.sh": "m",
+                             "submit_all_fullopt.sh": "XYZ"}),
+                       (pr, {"submit_all.sh": "c"})):
+        os.makedirs(d)
+        fileio.write_lf(os.path.join(d, "copy_back.sh"), "#\n")
+        for n, dirs in scripts.items():
+            fileio.write_lf(os.path.join(d, n), "".join(
+                'cd "%s" && submit_one cp2k.sbatch\n' % x for x in dirs))
+    lled = J.merge({"jobs": {}}, l2)
+    lth = {t["key"]: t for t in J.build_threads(lled, prefixes, root, now=T0 + 20000)}
+    ta, tr = lth.get("Foundations/f3/pkg_A"), lth.get("Foundations/q/pkg_rerun")
+    check("a package a live loop holds is a RUNNING thread with 0 Slurm jobs; its "
+          "named waves count as unsubmitted, an unnamed wave (fullopt) does not",
+          ta is not None and tr is not None and not ta["jobs"]
+          and ta["status"] == "RUNNING" and tr["status"] == "RUNNING"
+          and ta["unsubmitted"] == [("submit_all_molonly.sh", 1, 1),
+                                    ("submit_all_screen.sh", 3, 3)]
+          and tr["unsubmitted"] == [("submit_all.sh", 1, 1)],
+          (sorted(lth), ta and ta["unsubmitted"], tr and tr["unsubmitted"]))
+    ltxt = J.render_text(list(lth.values()), lled, T0 + 20000)
+    check("render_text: one line per top-level loop with its own node (a loop's "
+          "child is not repeated); an unreachable node is SAID; 'nothing handed "
+          "to Slurm yet'",
+          "submit loop alive on login-0" in ltxt and "submit loop alive on login-1" in ltxt
+          and ltxt.count("submit loop alive") == 2
+          and "login-2 NOT checked (UNREACHABLE)" in ltxt
+          and "nothing handed to Slurm yet" in ltxt, ltxt[:600])
+    rs = J.remote_script(21, ["login-0", "login-1"])
+    try:
+        J.remote_script(21, ["login-0; rm -rf ~"])
+        unsafe = "accepted"
+    except ValueError:
+        unsafe = "refused"
+    check("remote_script: ssh -n (stdin is the script), bracketed self-proof "
+          "pattern, every node looped, unsafe node names refused",
+          "ssh -n -o BatchMode=yes" in rs and "submi[t]" in rs and "psu[b]" in rs
+          and "for h in login-0 login-1; do" in rs and unsafe == "refused", unsafe)
     # HOME, NOT PROCESSED vs processed (2026-09-29): a drained, fully-home thread
     hp = os.path.join(root, "Foundations", "h", "pkg")
     os.makedirs(os.path.join(hp, "a"))

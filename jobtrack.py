@@ -67,10 +67,33 @@ SACCT_FIELDS = ("JobIDRaw,JobID,JobName,Partition,State,Submit,Start,End,"
 
 # ── remote side ─────────────────────────────────────────────────────────────
 
-def remote_script(days=21):
+LOGIN_NODE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def remote_script(days=21, login_nodes=()):
     """Bash run ON the cluster (`ssh host bash -s`). Prints one snapshot.
     Times as epoch seconds via SLURM_TIME_FORMAT so no timezone guessing;
-    the parser still accepts ISO stamps if a site ignores it."""
+    the parser still accepts ISO stamps if a site ignores it.
+
+    SUBMIT LOOPS ON EVERY LOGIN NODE (2026-09-30). A process list only shows
+    the node the ssh landed on, and Pronghorn round-robins login-0/login-1:
+    three 09-29/30 snapshots from login-0 saw NO loop while the probe loop ran
+    on login-1 the whole time, and the 09:48 one from login-1 missed the two
+    rebuild loops on login-0. So the loop probe runs locally AND over
+    `ssh -n -o BatchMode=yes` on each other node in `login_nodes` (the
+    tracker's config.json — site identity stays out of this public repo;
+    Marcus verified node-to-node ssh needs no prompt, 2026-09-30). `-n` is
+    load-bearing: this script arrives on stdin, and an ssh without it would
+    swallow the rest of it. Each node reports `#LOOPHOST <node> local|ok|
+    UNREACHABLE`, so an unchecked node is SAID, never silently empty. The
+    pgrep pattern is bracketed (`submi[t]`, `psu[b]`) so the probe's own
+    command lines (bash -c / ssh carrying the pattern text) never match it.
+    Lines are `L|host|pid|ppid|etime|cwd|cmd`; login-shell chatter is
+    filtered by the `L|` prefix."""
+    nodes = [n for n in login_nodes if n]
+    bad = [n for n in nodes if not LOGIN_NODE_RE.match(n)]
+    if bad:
+        raise ValueError("login_nodes: refusing unsafe node name(s) %r" % bad)
     return r"""export SLURM_TIME_FORMAT=%%s
 echo '%(tag)s'
 echo "#NOW $(date +%%s)"
@@ -80,12 +103,23 @@ echo '#SACCT'
 sacct -u "$USER" -X -P -n -S "$(date -d '-%(days)d days' +%%F)" -E now -o %(fields)s
 echo '#SQUEUE'
 squeue -u "$USER" -h -o '%%A|%%T|%%S|%%r'
-echo '#LOOPS'
-for p in $(pgrep -u "$USER" -f 'submit[^ ]*\.sh|psub' 2>/dev/null); do
-  echo "$p|$(ps -o etimes= -p "$p" 2>/dev/null | tr -d ' ')|$(readlink "/proc/$p/cwd" 2>/dev/null)|$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+JT_LOOPS='for p in $(pgrep -u "$USER" -f "submi[t][^ ]*\.sh|psu[b]" 2>/dev/null); do echo "L|$(hostname -s)|$p|$(ps -o ppid= -p "$p" 2>/dev/null | tr -d " ")|$(ps -o etimes= -p "$p" 2>/dev/null | tr -d " ")|$(readlink "/proc/$p/cwd" 2>/dev/null)|$(tr "\0" " " < "/proc/$p/cmdline" 2>/dev/null)"; done'
+JT_SELF=$(hostname -s)
+echo '#LOOPS2'
+echo "#LOOPHOST $JT_SELF local"
+bash -c "$JT_LOOPS"
+for h in %(nodes)s; do
+  [ "$h" = "$JT_SELF" ] && continue
+  if JT_OUT=$(ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$h" "$JT_LOOPS" 2>/dev/null); then
+    echo "#LOOPHOST $h ok"
+    printf '%%s\n' "$JT_OUT" | grep '^L|'
+  else
+    echo "#LOOPHOST $h UNREACHABLE"
+  fi
 done
 echo '#END'
-""" % {"tag": FORMAT_TAG, "days": int(days), "fields": SACCT_FIELDS}
+""" % {"tag": FORMAT_TAG, "days": int(days), "fields": SACCT_FIELDS,
+       "nodes": " ".join(nodes)}
 
 
 # ── parsing ─────────────────────────────────────────────────────────────────
@@ -127,7 +161,8 @@ def parse_snapshot(text):
     if "#END" not in [l.strip() for l in lines]:
         raise ValueError("snapshot is TRUNCATED (no #END) — refusing to ingest; "
                          "a dropped link must not read as 'all jobs gone'")
-    snap = {"now": None, "host": "", "days": None, "jobs": {}, "loops": []}
+    snap = {"now": None, "host": "", "days": None, "jobs": {}, "loops": [],
+            "loop_hosts": {}}
     queue = {}
     sec = None
     for raw in lines:
@@ -140,6 +175,9 @@ def parse_snapshot(text):
                 snap["host"] = val.strip()
             elif key == "#DAYS":
                 snap["days"] = int(val)
+            elif key == "#LOOPHOST":
+                h, _, st = val.strip().partition(" ")
+                snap["loop_hosts"][h] = st.strip()
             else:
                 sec = key
             continue
@@ -160,11 +198,17 @@ def parse_snapshot(text):
             if len(f) >= 4 and f[0].strip().isdigit():
                 queue[f[0].strip()] = {"state": f[1], "est_start": parse_time(f[2]),
                                        "reason": f[3]}
-        elif sec == "#LOOPS":
+        elif sec == "#LOOPS":       # pre-2026-09-30 snapshots: one node, no ppid
             f = l.split("|", 3)
             if len(f) == 4 and f[0].strip().isdigit():
                 snap["loops"].append({"pid": f[0], "etime": f[1],
                                       "cwd": f[2].rstrip("/"), "cmd": f[3].strip()})
+        elif sec == "#LOOPS2":
+            f = l.split("|", 6)
+            if len(f) == 7 and f[0] == "L" and f[2].strip().isdigit():
+                snap["loops"].append({"host": f[1].strip(), "pid": f[2].strip(),
+                                      "ppid": f[3].strip(), "etime": f[4].strip(),
+                                      "cwd": f[5].rstrip("/"), "cmd": f[6].strip()})
     for jid, q in queue.items():
         j = snap["jobs"].get(jid)
         if j is not None:
@@ -211,6 +255,7 @@ def merge(ledger, snap, cluster="pronghorn"):
         ledger["coverage_start"] = min(ledger.get("coverage_start", cs), cs)
     ledger["host"] = snap["host"]
     ledger["loops"] = snap["loops"]
+    ledger["loop_hosts"] = snap.get("loop_hosts", {})
     return ledger
 
 
@@ -422,12 +467,41 @@ def _loop_targets(loop):
     from the parent dir and names its packages only in the command)."""
     import posixpath
     cwd = loop.get("cwd", "")
+    cmd = loop.get("cmd", "")
+    # 2026-09-30: expand a simple `for v in a b c;` word list into `$v`/`${v}`
+    # tokens (`cd f3_rebuild/pkg_$p` names 12 packages), and resolve a `../x`
+    # token against the other named dirs too (`cd pkg_A && ...; cd ../pkg_B`
+    # is relative to pkg_A, not to the loop's cwd). Extra wrong paths are
+    # harmless: they match no package.
+    words = {v: vals.split() for v, vals in
+             re.findall(r"\bfor\s+(\w+)\s+in\s+([^;]*);", cmd)}
+    toks = []
+    for tok in re.split(r"[\s;'\"()&|]+", cmd):
+        if "/" not in tok or tok.startswith("-"):
+            continue
+        hit = [v for v in words if re.search(r"\$\{?%s(?!\w)\}?" % v, tok)]
+        if hit:
+            pat = r"\$\{?%s(?!\w)\}?" % hit[0]
+            toks += [re.sub(pat, w, tok) for w in words[hit[0]]]
+        else:
+            toks.append(tok)
+    def place(base, tok):
+        full = posixpath.normpath(posixpath.join(base, tok))
+        return posixpath.dirname(full) if tok.endswith(".sh") else full
     out = {cwd}
-    for tok in re.split(r"[\s;'\"]+", loop.get("cmd", "")):
-        if "/" in tok and not tok.startswith("-") and "$" not in tok.split("/")[0]:
-            full = posixpath.normpath(posixpath.join(cwd, tok))
-            out.add(posixpath.dirname(full) if tok.endswith(".sh") else full)
+    for tok in toks:
+        if "$" not in tok.split("/")[0]:
+            out.add(place(cwd, tok))
+    for tok in [t for t in toks if t.startswith("..")]:
+        out |= {place(b, tok) for b in list(out)}
     return out
+
+
+def _loop_scripts(loop):
+    """Basenames of the submit scripts a live loop runs or will run — the
+    waves it is holding, even before any of their jobs reaches Slurm."""
+    return {t.rsplit("/", 1)[-1] for t in re.split(r"[\s;'\"()&|]+", loop.get("cmd", ""))
+            if t.endswith(".sh")}
 
 
 def build_threads(ledger, prefixes, root, now=None, acks=None, check_home=True):
@@ -469,6 +543,20 @@ def build_threads(ledger, prefixes, root, now=None, acks=None, check_home=True):
         else:
             j["home_now"] = j.get("home") or "?"
         t["jobs"].append(j)
+    # 2026-09-30: a package a live loop is working through has a thread even
+    # before its first job reaches Slurm (the throttle may hold it for days)
+    for l in ledger.get("loops", []):
+        for tgt in _loop_targets(l):
+            loc = to_local(tgt, prefixes, root)
+            pkg = find_package(loc, root) if loc and os.path.isdir(loc) else None
+            if not pkg:
+                continue
+            key = os.path.relpath(pkg, root).replace(os.sep, "/")
+            if key not in threads:
+                rel = os.path.relpath(loc, pkg).replace(os.sep, "/")
+                threads[key] = {"key": key, "pkg": pkg, "jobs": [],
+                                "remote": tgt[:len(tgt) - len(rel)].rstrip("/")
+                                if rel != "." else tgt}
     out = []
     for t in threads.values():
         _classify(t, ledger, now, root)
@@ -506,8 +594,8 @@ def _classify(t, ledger, now, root):
     t["counts"] = c
     ended = [j["end"] for j in js if j.get("end") and j.get("state") not in ACTIVE]
     t["last_end"] = max(ended) if ended else None
-    t["first_submit"] = min((j.get("submit") or now) for j in js)
-    t["last_activity"] = max([j.get("submit") or 0 for j in js] + ended)
+    t["first_submit"] = min(((j.get("submit") or now) for j in js), default=now)
+    t["last_activity"] = max([j.get("submit") or 0 for j in js] + ended, default=now)
     # typical runtime from this thread's own completed jobs
     runs = [j["elapsed"] for j in js if j.get("state") == "COMPLETED"
             and j.get("elapsed")]
@@ -531,6 +619,12 @@ def _classify(t, ledger, now, root):
     t["typical_run"] = typ
     t["pending_unestimated"] = sum(1 for j in js if j.get("state") == "PENDING"
                                    and not j.get("est_start"))
+    rp = t["remote"]
+    t["loops"] = [l for l in ledger.get("loops", [])
+                  if any(x == rp or x.startswith(rp + "/") for x in _loop_targets(l))]
+    named = set()
+    for l in t["loops"]:
+        named |= _loop_scripts(l)
     # waves still inside a submit loop (never handed to Slurm yet)
     t["unsubmitted"] = []
     recent = t["last_activity"] >= now - 3 * 86400
@@ -544,16 +638,18 @@ def _classify(t, ledger, now, root):
         for script, (mt, dirs) in submit_dirs(t["pkg"]).items():
             rds = [t["remote"] + "/" + d.strip("/") for d in dirs]
             hit = sum(1 for r in rds if subs.get(r, 0) >= mt - 60)
-            if not 0 < hit < len(rds) or mt < ledger.get("coverage_start", 0):
-                continue          # wave not started, or older than sacct's view
+            if hit >= len(rds) or mt < ledger.get("coverage_start", 0):
+                continue          # wave complete, or older than sacct's view
+            if hit == 0 and script not in named:
+                continue          # not started, and no live loop is holding it
+            if hit == 0:          # held by a live loop behind the throttle
+                t["unsubmitted"].append((script, len(rds), len(rds)))
+                continue
             # only a CURRENT wave can have a live-or-dead loop; on an old
             # thread the gap is usually work done elsewhere or skipped by a
             # DONE guard, so it is shown but does not raise ATTENTION
             (t["unsubmitted"] if recent or c["running"] + c["pending"]
              else t["unsubmitted_info"]).append((script, len(rds) - hit, len(rds)))
-    rp = t["remote"]
-    t["loops"] = [l for l in ledger.get("loops", [])
-                  if any(x == rp or x.startswith(rp + "/") for x in _loop_targets(l))]
     t["next"] = next_step(t["pkg"], root) if t["pkg"] else ""
     active = c["running"] + c["pending"]
     waiting = sum(n for _, n, _ in t["unsubmitted"])
@@ -663,6 +759,8 @@ def thread_lines(t, now):
     if fin:
         parts.append("%d finished (%d home%s)" % (
             fin, c["home"], ", %d partial" % c["partial"] if c["partial"] else ""))
+    if not t["jobs"]:
+        parts.append("nothing handed to Slurm yet")
     if c["bad"]:
         bad = {}
         for j in t["jobs"]:
@@ -726,9 +824,22 @@ def render_text(threads, ledger, now, home_days=7):
     head = ["Cluster jobs — as of %s (%s)%s" % (
         _t(lf), _ago(lf, now), "  ⚠ STALE: re-run jobs.sh" if lf and now - lf > 12 * 3600 else "")]
     body = []
-    for l in ledger.get("loops", []):
+    loops = ledger.get("loops", [])
+    pids = {(l.get("host"), l["pid"]) for l in loops}
+    for l in loops:      # a loop's own children (the running submit_*.sh) are not repeated
+        if l.get("ppid") and (l.get("host"), l["ppid"]) in pids:
+            continue
         body.append("submit loop alive on %s for %s: %s" % (
-            ledger.get("host", "?"), _span(int(l.get("etime") or 0)), l["cmd"][:200]))
+            l.get("host") or ledger.get("host", "?"), _span(int(l.get("etime") or 0)),
+            l["cmd"][:200]))
+    lh = ledger.get("loop_hosts")
+    if not lh:
+        body.append("(submit loops checked on %s only — set login_nodes in "
+                    "jobtrack/config.json to check every login node)" % ledger.get("host", "?"))
+    for h, st in sorted((lh or {}).items()):
+        if st not in ("local", "ok"):
+            body.append("⚠ submit loops on %s NOT checked (%s) — loops there are "
+                        "invisible to this report" % (h, st))
     for status in STATUSES:
         ts = [t for t in threads if t["status"] == status and not t["acked"]]
         if status == "HOME":
@@ -891,7 +1002,9 @@ def main(argv=None):
         pass
     if args.cmd == "remote-script":
         # bytes, not text: Windows text mode would emit CRLF into remote bash
-        sys.stdout.buffer.write(remote_script(args.days).encode("utf-8"))
+        cfg = load_json(os.path.join(args.dir, "config.json"), {})
+        sys.stdout.buffer.write(remote_script(
+            args.days, cfg.get("login_nodes", [])).encode("utf-8"))
     elif args.cmd == "ingest":
         snap = ingest(args.dir, args.root, args.snapshot)
         print("ingested %d jobs from %s" % (len(snap["jobs"]), snap["host"]))
